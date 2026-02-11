@@ -1,0 +1,11 @@
+[meta]
+name     = "TrackGenerator"
+author   = "YOUR_NAME"
+category = "Map Editor"
+version  = "1.0.0"
+# siteid = 156  # original plugin; set your own if you publish elsewhere
+
+[script]
+# Icons, Formatting, Permissions are built into OpenPlanet; no imports needed.
+# If the plugin fails to load, try uncommenting: imports = [ "Icons.as", "Formatting.as", "Permissions.as" ]
+timeout = 15000
