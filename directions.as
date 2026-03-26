@@ -43,9 +43,33 @@ CGameEditorPluginMap::ECardinalDirections TurnDirRight(CGameEditorPluginMap::ECa
 		case CGameEditorPluginMap::ECardinalDirections::South:
 			return CGameEditorPluginMap::ECardinalDirections::West;
 		case CGameEditorPluginMap::ECardinalDirections::West:
-			CGameEditorPluginMap::ECardinalDirections::North;
+			return CGameEditorPluginMap::ECardinalDirections::North;
 	}
 	
+	return CGameEditorPluginMap::ECardinalDirections::North;
+}
+
+int DirToInt(CGameEditorPluginMap::ECardinalDirections dir)
+{
+	switch(dir)
+	{
+		case CGameEditorPluginMap::ECardinalDirections::North: return 0;
+		case CGameEditorPluginMap::ECardinalDirections::East:  return 1;
+		case CGameEditorPluginMap::ECardinalDirections::South: return 2;
+		case CGameEditorPluginMap::ECardinalDirections::West:  return 3;
+	}
+	return 0;
+}
+
+CGameEditorPluginMap::ECardinalDirections IntToDir(int i)
+{
+	switch(i)
+	{
+		case 0: return CGameEditorPluginMap::ECardinalDirections::North;
+		case 1: return CGameEditorPluginMap::ECardinalDirections::East;
+		case 2: return CGameEditorPluginMap::ECardinalDirections::South;
+		case 3: return CGameEditorPluginMap::ECardinalDirections::West;
+	}
 	return CGameEditorPluginMap::ECardinalDirections::North;
 }
 
@@ -64,4 +88,10 @@ CGameEditorPluginMap::ECardinalDirections ConvertDir(CGameEditorPluginMapConnect
 	}
 	
 	return CGameEditorPluginMap::ECardinalDirections::North;
+}
+
+// Overload for when res.Dir is already the map enum (TM2020 API)
+CGameEditorPluginMap::ECardinalDirections ConvertDir(CGameEditorPluginMap::ECardinalDirections dir)
+{
+	return dir;
 }

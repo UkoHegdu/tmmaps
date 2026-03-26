@@ -8,7 +8,7 @@ OpenPlanet plugin for Trackmania that generates random tracks in the map editor.
 
 - Generate a random track (start → blocks → finish) from the editor.
 - Multiple block styles (Tech, Dirt, Ice, Platform, etc.), checkpoints, seed support, special blocks.
-- **Dump block names to log** – writes all default block `IdName`s from the game to the OpenPlanet log so you can see the current list for your game version.
+- **Dump block names to log** – writes all loaded block `IdName`s (and a **kind**: Scenery / Track / Other, guessed from name prefix) to the OpenPlanet log. The list includes both default and custom blocks; the game API does not expose which are custom.
 
 ## Requirements
 

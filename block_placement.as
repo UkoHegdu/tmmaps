@@ -2,7 +2,7 @@ bool PlaceBlock(CGameEditorPluginMap@ map, const string blockName, CGameEditorPl
 {
     auto info = map.GetBlockModelFromName(blockName);
 	
-	if(!(map.GetBlock(point) is null) && (blockName != RD_TURN2 && blockName != RD_UP2) && (map.GetBlock(point).BlockModel.IdName == WALL_STRAIGHT || map.GetBlock(point).BlockModel.IdName == WALL_FULL))
+	if(!(map.GetBlock(point) is null) && (blockName != blocks::RD_TURN2 && blockName != blocks::RD_UP2) && (map.GetBlock(point).BlockModel.IdName == blocks::WALL_STRAIGHT || map.GetBlock(point).BlockModel.IdName == blocks::WALL_FULL))
 	{
 		ClearPath(map, point);
 	}
@@ -18,10 +18,10 @@ bool CanPlaceBlock(CGameEditorPluginMap@ map, const string blockName, CGameEdito
 {
 	auto info = map.GetBlockModelFromName(blockName);
 
-	if(!(map.GetBlock(point) is null) && (blockName != RD_TURN2 && blockName != RD_UP2) && (map.GetBlock(point).BlockModel.IdName == WALL_STRAIGHT || map.GetBlock(point).BlockModel.IdName == WALL_FULL))
+	if(!(map.GetBlock(point) is null) && (blockName != blocks::RD_TURN2 && blockName != blocks::RD_UP2) && (map.GetBlock(point).BlockModel.IdName == blocks::WALL_STRAIGHT || map.GetBlock(point).BlockModel.IdName == blocks::WALL_FULL))
 	{
 		auto upPoint = point.opAdd(int3(0,1,0));
-		if(!(map.GetBlock(upPoint) is null) && (map.GetBlock(upPoint).BlockModel.IdName == WALL_STRAIGHT || map.GetBlock(upPoint).BlockModel.IdName == WALL_FULL))
+		if(!(map.GetBlock(upPoint) is null) && (map.GetBlock(upPoint).BlockModel.IdName == blocks::WALL_STRAIGHT || map.GetBlock(upPoint).BlockModel.IdName == blocks::WALL_FULL))
 		{
 			return true;
 		}		
@@ -57,16 +57,19 @@ bool CanPlaceGhostBlock(CGameEditorPluginMap@ map, const string blockName, CGame
     return map.CanPlaceGhostBlock(info, point, dir);	
 }
 
-CGameEditorPluginMapConnectResults@ ConnectBlocks(CGameEditorPluginMap@ map, CGameCtnBlock@ eBlock, const string nBlock)
+CGameEditorPluginMapConnectResults@ ConnectBlocks(CGameEditorPluginMap@ map, int3 blockPos, const string nBlock)
 {
 	try
     {
+		if (map.GetBlock(blockPos) is null) return null;
+
 		auto info = map.GetBlockModelFromName(nBlock);
+		if (info is null) return null;
 
 		while (!map.IsEditorReadyForRequest) {
 			yield();
 		}
-		map.GetConnectResults(eBlock, info);
+		map.GetConnectResults(map.GetBlock(blockPos), info);
 		
 		while (!map.IsEditorReadyForRequest) {
 			yield();
@@ -93,7 +96,7 @@ void ClearPath(CGameEditorPluginMap@ map, int3 point)
 	map.RemoveBlock(point);
 	
 	auto upPoint = point.opAdd(int3(0,1,0));
-	if(!(map.GetBlock(upPoint) is null) && (map.GetBlock(upPoint).BlockModel.IdName == WALL_STRAIGHT || map.GetBlock(upPoint).BlockModel.IdName == WALL_FULL))
+	if(!(map.GetBlock(upPoint) is null) && (map.GetBlock(upPoint).BlockModel.IdName == blocks::WALL_STRAIGHT || map.GetBlock(upPoint).BlockModel.IdName == blocks::WALL_FULL))
 	{
 		while (!map.IsEditorReadyForRequest) {
 			yield();

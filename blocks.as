@@ -1,5 +1,8 @@
 //block blanks
+namespace blocks
+{
 string CURR_BLOCKS = "";
+string CURR_VISTA = "Stadium";  // Stadium | BlueBay | GreenCoast | RedIsland | WhiteShore
 string RD_STRAIGHT = "";
 string RD_START = "";
 string RD_FINISH = "";
@@ -27,12 +30,15 @@ string RD_CRUISE = "";
 string RD_NOBRAKE = "";
 string RD_COOL1 = "";
 string RD_COOL2 = "";
+// platform block used for "drop" escape when dead end (one level below, left/right); must be platform so no walls
+string PLATFORM_DROP = "PlatformTechBase";
 //--
 
 //enabled blocks
-bool roadblocks = true, dirtblocks = false, iceblocks = false, icewallblocks = false, sausageblocks = false, opentechroadblocks = false, opendirtroadblocks = false, openiceroadblocks = false, opengrassroadblocks = false, waterblocks = false, platformtechblocks = false, platformdirtblocks = false, platformiceblocks = false, platformgrassblocks = false, plasticblocks = false;
+bool roadblocks = true, dirtblocks = false, iceblocks = false, icewallblocks = false, sausageblocks = false, opentechroadblocks = false, opendirtroadblocks = false, openiceroadblocks = false, opengrassroadblocks = false, waterblocks = false, platformtechblocks = false, platformdirtblocks = false, platformiceblocks = false, platformgrassblocks = false, plasticblocks = false, snowblocks = false, rallyblocks = false;
 bool turbo1 = true, turbo2 = false, booster1 = false, booster2 = false, noengine = false, slowmotion = false, fragile = false, nosteer = false, reset = false, cruise = false, nobrake = false, turbor = false;
 bool coolblocks = true, randomcolors = false;
+bool extendedSlopes = false;  // when true: more slope chance, max blocks capped at 100, multi-block rollback for slope dead ends
 //--
 
 //walls
@@ -46,25 +52,24 @@ string ITEM_TURNSTILE4_1 = "ObstacleTurnstile4mTripleRightLevel0";
 string ITEM_FLAG1 = "Flag8m";
 //--
 
-//scenery blocks array
-string[] SCENERY_BLOCKS = {
-"DecoHillSlope2Straight", "DecoHillSlope2StraightX2", "DecoHillSlope2Curve1In", "DecoHillSlope2Curve1Out", "DecoPlatformBase",
-"DecoHillSlope2Straight", "DecoHillSlope2StraightX2", "DecoHillSlope2Curve1In", "DecoHillSlope2Curve1Out", "DecoPlatformBase",
-"DecoHillDirtSlope2Straight", "DecoHillDirtSlope2StraightX2", "DecoHillDirtSlope2Curve1In", "DecoHillDirtSlope2Curve1Out", "DecoPlatformDirtBase",
-"DecoHillIceSlope2Straight", "DecoHillIceSlope2StraightX2", "DecoHillIceSlope2Curve1In", "DecoHillIceSlope2Curve1Out", "DecoPlatformIceBase",
-"DecoHillSlope2Straight", "DecoHillSlope2StraightX2", "DecoHillSlope2Curve1In", "DecoHillSlope2Curve1Out", "DecoPlatformBase",
-"DecoHillSlope2Straight", "DecoHillSlope2StraightX2", "DecoHillSlope2Curve1In", "DecoHillSlope2Curve1Out", "DecoPlatformBase",
-"DecoHillDirtSlope2Straight", "DecoHillDirtSlope2StraightX2", "DecoHillDirtSlope2Curve1In", "DecoHillDirtSlope2Curve1Out", "DecoPlatformDirtBase",
-"DecoHillIceSlope2Straight", "DecoHillIceSlope2StraightX2", "DecoHillIceSlope2Curve1In", "DecoHillIceSlope2Curve1Out", "DecoPlatformIceBase",
-"StructureSupportCorner", "StructureSupportStraight", "StructureSupportCross", "StructureCross",
-"DecoWallLoopStart3x6Center", "DecoWallLoopEnd3x6Center", "PlatformTechLoopStart", "PlatformPlasticLoopStart",
-"WaterWallCorner", "WaterWallCross", "WaterWallStraight",
-"GateSpecialReset", "TechnicsScreen1x1Straight",
-"StageTechnicsLightDeadend", "StageTechnicsLightDeadend", "StageTechnicsLightDeadend",
-"CanopyCenterFlatBase", "StageCurve1In", "StandStraight",
-"CanopyCenterFlatBase", "StageCurve1In", "StandStraight",
-};
+// SCENERY_<Vista> and GetBlockFromPoolImpl are in blocks_generated.as (run generate_blocks_as.py).
 //--
+
+array<string>@ GetSceneryBlocks()
+{
+	if (CURR_VISTA == "BlueBay") return SCENERY_BlueBay;
+	if (CURR_VISTA == "GreenCoast") return SCENERY_GreenCoast;
+	if (CURR_VISTA == "RedIsland") return SCENERY_RedIsland;
+	if (CURR_VISTA == "WhiteShore") return SCENERY_WhiteShore;
+	return SCENERY_Stadium;
+}
+
+string PickFromPool(array<string>@ arr, const string &in fallback)
+{
+	if (arr.Length > 0)
+		return arr[Math::Rand(0, int(arr.Length) - 1)];
+	return fallback;
+}
 
 bool IsMultipleBlockTypesSelected()
 {
@@ -84,6 +89,7 @@ bool IsMultipleBlockTypesSelected()
 	if (platformiceblocks) { count++; }
 	if (platformgrassblocks) { count++; }
 	if (plasticblocks) { count++; }
+	// snowblocks, rallyblocks excluded - disabled
 	return count > 1;
 }
 
@@ -164,7 +170,7 @@ bool SetBlockType(int id)
 		blocks::PlasticBlocks();
 		return true;
 	}
-	
+	// Snow (16) and Rally (17) disabled - no transition support
 	return false;
 }
 
@@ -185,7 +191,11 @@ void SetBlockType(const string type)
 	if(type == "PlatformIceBlocks") {blocks::PlatformIceBlocks();}
 	if(type == "PlatformGrassBlocks") {blocks::PlatformGrassBlocks();}
 	if(type == "PlasticBlocks") {blocks::PlasticBlocks();}
+	if(type == "SnowBlocks") {blocks::SnowBlocks();}
+	if(type == "RallyBlocks") {blocks::RallyBlocks();}
 }
+
+} // namespace blocks (block blanks)
 
 //block blanks fillers
 namespace blocks
@@ -668,6 +678,51 @@ void PlasticBlocks()
 	RD_NOBRAKE = "PlatformPlasticSpecialNoBrake";
 	RD_COOL1 = "PlatformPlasticBaseWithHole24m";
 	RD_COOL2 = "PlatformPlasticSlope2Start";
-}	
+}
+
+void SnowBlocks()
+{
+	CURR_BLOCKS = "SnowBlocks";
+	RD_STRAIGHT = "SnowRoadStraight";
+	RD_START = "RoadTechStart";  // fallback - Snow doesn't have Start
+	RD_FINISH = "RoadTechFinish";  // fallback - Snow doesn't have Finish
+	RD_TURN1 = "SnowRoadCurve1";
+	RD_TURN2 = "SnowRoadCurve2";
+	RD_TURN3 = "SnowRoadCurve3";
+	RD_UP1 = "SnowRoadSlopeBase";
+	RD_UP2 = "SnowRoadSlope2Base";
+	RD_CP = "RoadTechCheckpoint";  // fallback - Snow doesn't have Checkpoint
+	RD_END = "RoadTechToThemeSnowRoad";
+	RD_CONNECT = "RoadTechToThemeSnowRoad";
+	RD_COOL1 = "SnowRoadStraight";
+	RD_COOL2 = "SnowRoadStraight";
+}
+
+void RallyBlocks()
+{
+	CURR_BLOCKS = "RallyBlocks";
+	RD_STRAIGHT = "RallyCastleRoadStraight";
+	RD_START = "RoadTechStart";  // fallback - Rally doesn't have Start
+	RD_FINISH = "RoadTechFinish";  // fallback - Rally doesn't have Finish
+	RD_TURN1 = "RallyCastleRoadCurve1";
+	RD_TURN2 = "RallyCastleRoadCurve1";
+	RD_TURN3 = "RallyCastleRoadCurve1";
+	RD_UP1 = "RallyCastleRoadStraight";
+	RD_UP2 = "RallyCastleRoadStraight";
+	RD_CP = "RoadTechCheckpoint";  // fallback - Rally doesn't have Checkpoint
+	RD_END = "RallyCastleRoadToRoadTech";
+	RD_CONNECT = "RallyCastleRoadToRoadTech";
+	RD_COOL1 = "RallyCastleRoadStraight";
+	RD_COOL2 = "RallyCastleRoadStraight";
+}
+
+// Returns a random block from blocks_generated.as pool for current Vista, style and role (via GetBlockFromPoolImpl).
+string GetBlockFromPool(const string &in role)
+{
+	return GetBlockFromPoolImpl(role);
+}
+
+// (GetBlockFromPool body is in blocks_generated.as as GetBlockFromPoolImpl.)
+
 }
 //--

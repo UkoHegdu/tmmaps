@@ -77,120 +77,121 @@ int3 RandomPoint()
 string RandomBlock()
 {
 	int randomInt = MathRand(1, 101);
-	if (randomInt <= 6 && IsMultipleBlockTypesSelected())
+	if (randomInt <= 6 && blocks::IsMultipleBlockTypesSelected())
 	{
-		return RD_CONNECT;
+		return blocks::RD_CONNECT;
 	}
-	else if (randomInt <= 7 && coolblocks)
+	else if (randomInt <= 7 && blocks::coolblocks)
 	{
-		return RD_COOL1;
+		return blocks::GetBlockFromPool("Cool1");
 	}
-	else if (randomInt <= 8 && coolblocks)
+	else if (randomInt <= 8 && blocks::coolblocks)
 	{
-		return RD_COOL2;
+		return blocks::GetBlockFromPool("Cool2");
 	}
 	
 	else if (randomInt <= 43)
 	{
-		return RD_STRAIGHT;
+		return blocks::GetBlockFromPool("Straight");
 	}
 	else if(randomInt <= 55) // special blocks
 	{
 		if(randomInt <= 44)
 		{	
-			if(!nobrake) {return RD_STRAIGHT;}
-			return RD_NOBRAKE;
+			if(!blocks::nobrake) {return blocks::GetBlockFromPool("Straight");}
+			return blocks::GetBlockFromPool("NoBrake");
 		}
 		else if(randomInt <= 45)
 		{
-			if(!cruise) {return RD_STRAIGHT;}
-			return RD_CRUISE;
+			if(!blocks::cruise) {return blocks::GetBlockFromPool("Straight");}
+			return blocks::GetBlockFromPool("Cruise");
 		}
 		else if(randomInt <= 46)
 		{	
-			if(!fragile) {return RD_STRAIGHT;}
-			return RD_FRAGILE;
+			if(!blocks::fragile) {return blocks::GetBlockFromPool("Straight");}
+			return blocks::GetBlockFromPool("Fragile");
 		}
 		else if(randomInt <= 47)
 		{
-			if(!nosteer) {return RD_STRAIGHT;}
-			return RD_NOSTEER;
+			if(!blocks::nosteer) {return blocks::GetBlockFromPool("Straight");}
+			return blocks::GetBlockFromPool("NoSteer");
 		}
 		else if(randomInt <= 48)
 		{
-			if(!slowmotion) {return RD_STRAIGHT;}
-			return RD_SLOWMOTION;
+			if(!blocks::slowmotion) {return blocks::GetBlockFromPool("Straight");}
+			return blocks::GetBlockFromPool("SlowMotion");
 		}	
 		else if(randomInt <= 49)
 		{
-			if(!noengine) {return RD_STRAIGHT;}
-			return RD_NOENGINE;
+			if(!blocks::noengine) {return blocks::GetBlockFromPool("Straight");}
+			return blocks::GetBlockFromPool("NoEngine");
 		}			
 		else if(randomInt <= 50)
 		{
-			if(!booster1) {return RD_STRAIGHT;}
-			return RD_BOOSTER1;
+			if(!blocks::booster1) {return blocks::GetBlockFromPool("Straight");}
+			return blocks::GetBlockFromPool("Booster1");
 		}		
-		else if(randomInt <= 51 && booster2)
+		else if(randomInt <= 51 && blocks::booster2)
 		{
-			return RD_BOOSTER2;
+			return blocks::GetBlockFromPool("Booster2");
 		}				
-		else if(randomInt <= 52 && turbo2)
+		else if(randomInt <= 52 && blocks::turbo2)
 		{
-			return RD_TURBO2;
+			return blocks::GetBlockFromPool("Turbo2");
 		}	
-		else if(randomInt <= 53 && turbor)
+		else if(randomInt <= 53 && blocks::turbor)
 		{
-			return RD_TURBOR;
+			return blocks::GetBlockFromPool("TurboR");
 		}		
-		else if(randomInt <= 54 && reset)
+		else if(randomInt <= 54 && blocks::reset)
 		{
-			return RD_RESET;
+			return blocks::GetBlockFromPool("Reset");
 		}
-		else if(turbo1)
+		else if(blocks::turbo1)
 		{
-			return RD_TURBO1;
+			return blocks::GetBlockFromPool("Turbo1");
 		}			
 		else 
 		{
-			return RD_STRAIGHT;
+			return blocks::GetBlockFromPool("Straight");
 		}
 	}
 	else if(randomInt <= 60)
 	{
 		if(st_useCpBlocks)
 		{
-			return RD_STRAIGHT;
+			return blocks::GetBlockFromPool("Straight");
 		}
 	
-		return RD_CP;
+		return blocks::GetBlockFromPool("Checkpoint");
 	}
-	else if(randomInt <= 70)
+	else if(randomInt <= (blocks::extendedSlopes ? 80 : 70))
 	{
-		return RD_UP1;
+		return blocks::GetBlockFromPool("Slope");
 	}
-	else if(randomInt <= 77)
+	else if(randomInt <= (blocks::extendedSlopes ? 88 : 77))
 	{
-		return RD_UP2;
+		return blocks::GetBlockFromPool("Slope2");
 	}
 	else if(randomInt <= 92)
 	{
-		return RD_TURN2;
+		return blocks::GetBlockFromPool("Turn2");
 	}
 	else
 	{
-		return RD_TURN1;
+		return blocks::GetBlockFromPool("Turn1");
 	}
 }
 
 void RandomBlocks()
 {
-	if (IsMultipleBlockTypesSelected())
+	if (blocks::IsMultipleBlockTypesSelected())
 	{
 		bool ready = false;
 		while(!ready)
 		{
-			ready = SetBlockType(MathRand(1,16));
+			// Exclude Snow (16) and Rally (17) - not supported with transition logic
+			ready = blocks::SetBlockType(MathRand(1, 15));
 		}
 	}
 }
@@ -228,5 +229,7 @@ CGameEditorPluginMap::EMapElemColor RandomColor()
 
 string RandomSceneryBlock()
 {
-	return SCENERY_BLOCKS[Math::Rand(0, SCENERY_BLOCKS.Length)];
+	auto arr = blocks::GetSceneryBlocks();
+	if (arr.Length == 0) return "";
+	return arr[Math::Rand(0, int(arr.Length) - 1)];
 }
