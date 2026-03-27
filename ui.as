@@ -92,6 +92,10 @@ void RenderTrackGenerator()
 	if (UI::Button(Icons::Trash + " Clear Track")) {
 		startnew(v4::ClearLastRun);
 	}
+	UI::SameLine();
+	if (UI::Button(Icons::Search + " Check direction for blocks")) {
+		startnew(v4::CheckDirectionForBlocks);
+	}
 
 	UI::Separator();
 	UI::Markdown("**Block Count**");

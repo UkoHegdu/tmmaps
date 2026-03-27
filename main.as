@@ -746,12 +746,21 @@ void FindSuitableBlocksForSlope()
 // Return block handle at position from RootMap.Blocks (avoids map.GetBlock return type issues).
 CGameCtnBlock@ GetBlockAt(CGameEditorPluginMap@ map, int3 pos)
 {
-	auto blocks = GetApp().RootMap.Blocks;
-	for (uint i = 0; i < blocks.Length; i++) {
-		if (int(blocks[i].CoordX) == pos.x && int(blocks[i].CoordY) == pos.y && int(blocks[i].CoordZ) == pos.z)
-			return blocks[i];
+	auto allBlocks = GetApp().RootMap.Blocks;
+	CGameCtnBlock@ fallback = null;
+	for (uint i = 0; i < allBlocks.Length; i++) {
+		if (int(allBlocks[i].CoordX) == pos.x && int(allBlocks[i].CoordY) == pos.y && int(allBlocks[i].CoordZ) == pos.z) {
+			// Skip auto-placed infrastructure blocks (pillars, deco bases) so that
+			// the underlying track block is returned instead.
+			string n = allBlocks[i].BlockModel.IdName;
+			if (n == "TrackWallStraightPillar" || n == "DecoWallBasePillar") {
+				if (fallback is null) @fallback = allBlocks[i];
+				continue;
+			}
+			return allBlocks[i];
+		}
 	}
-	return null;
+	return fallback;
 }
 
 // Get cardinal direction from a map block (RootMap.Blocks[i]). Tries BlockDir then Dir (0=North,1=East,2=South,3=West).
