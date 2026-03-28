@@ -16,6 +16,30 @@ bool st_v4Special = true;
 [Setting category="General" name="Enable ramp blocks"]
 bool st_v4Ramps = true;
 
+[Setting category="General" name="Enable Road Dirt blocks"]
+bool st_v4Dirt = false;
+
+[Setting category="General" name="Enable dirt slope blocks"]
+bool st_v4DirtSlope = false;
+
+[Setting category="General" name="Enable dirt tilt blocks"]
+bool st_v4DirtTilt = false;
+
+[Setting category="General" name="Enable Road Bump blocks"]
+bool st_v4Bump = false;
+
+[Setting category="General" name="Enable bump slope blocks"]
+bool st_v4BumpSlope = false;
+
+[Setting category="General" name="Enable bump tilt blocks"]
+bool st_v4BumpTilt = false;
+
+[Setting category="General" name="Enable Road Ice blocks"]
+bool st_v4Ice = false;
+
+[Setting category="General" name="Enable ice slope blocks"]
+bool st_v4IceSlope = false;
+
 [Setting category="General" name="Use CP blocks"]
 bool st_useCpBlocks = false;
 

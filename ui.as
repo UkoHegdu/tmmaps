@@ -2,6 +2,33 @@ bool HAS_ADVANCED_EDITOR = false;
 
 //vars
 bool display = false, preloaded = false;
+int g_checkDirProbeIdx = 0;
+const array<string> CHECK_DIR_LABELS = {
+	"1 · Straight",
+	"2 · TiltTrans UpLeft",
+	"3 · TiltTrans DownRight",
+	"4 · SlopeEnd 2x1",
+	"5 · SlopeStart 2x1",
+	"6 · TiltStraight",
+	"7 · SlopeStraightR",
+	"8 · Dirt Straight",
+	"9 · Dirt SlopeStart 2x1",
+	"10 · Dirt SlopeEnd 2x1",
+	"11 · Dirt SlopeStraight"
+};
+const array<string> CHECK_DIR_BLOCKS = {
+	"RoadTechStraight",
+	"RoadTechTiltTransition1UpLeft",
+	"RoadTechTiltTransition1DownRight",
+	"RoadTechSlopeEnd2x1",
+	"RoadTechSlopeStart2x1",
+	"RoadTechTiltStraight",
+	"RoadTechSlopeStraight",
+	"RoadDirtStraight",
+	"RoadDirtSlopeStart2x1",
+	"RoadDirtSlopeEnd2x1",
+	"RoadDirtSlopeStraight"
+};
 bool tabTrack = true, tabScenery = false, tabSettings = false, tabDev = false;
 int st_maxBlocks = 45;
 //--
@@ -93,7 +120,18 @@ void RenderTrackGenerator()
 		startnew(v4::ClearLastRun);
 	}
 	UI::SameLine();
-	if (UI::Button(Icons::Search + " Check direction for blocks")) {
+	UI::SetNextItemWidth(160);
+	if (UI::BeginCombo("##probe", CHECK_DIR_LABELS[g_checkDirProbeIdx])) {
+		for (uint i = 0; i < CHECK_DIR_LABELS.Length; i++) {
+			if (UI::Selectable(CHECK_DIR_LABELS[i], g_checkDirProbeIdx == int(i))) {
+				g_checkDirProbeIdx = i;
+			}
+		}
+		UI::EndCombo();
+	}
+	UI::SameLine();
+	if (UI::Button(Icons::Search + " Check direction")) {
+		v4::g_checkDirProbeName = CHECK_DIR_BLOCKS[g_checkDirProbeIdx];
 		startnew(v4::CheckDirectionForBlocks);
 	}
 
@@ -110,6 +148,24 @@ void RenderTrackGenerator()
 	if (!st_v4Slope && !st_v4Tilt) UI::TextDisabled("Flat only.");
 	st_v4Special = UI::Checkbox("Special blocks \\$bbb(turbo, boost, no-engine, etc.)", st_v4Special);
 	st_v4Ramps   = UI::Checkbox("Ramp blocks", st_v4Ramps);
+
+	UI::Separator();
+	UI::Markdown("**Surface Mix** \\$bbb(transitions inserted automatically)");
+	st_v4Dirt = UI::Checkbox("RoadDirt", st_v4Dirt);
+	if (st_v4Dirt) {
+		UI::SameLine(); st_v4DirtSlope = UI::Checkbox("Dirt Slopes", st_v4DirtSlope);
+		UI::SameLine(); st_v4DirtTilt  = UI::Checkbox("Dirt Tilt",   st_v4DirtTilt);
+	}
+	st_v4Bump = UI::Checkbox("RoadBump", st_v4Bump);
+	if (st_v4Bump) {
+		UI::SameLine(); st_v4BumpSlope = UI::Checkbox("Bump Slopes", st_v4BumpSlope);
+		UI::SameLine(); st_v4BumpTilt  = UI::Checkbox("Bump Tilt",   st_v4BumpTilt);
+	}
+	st_v4Ice = UI::Checkbox("RoadIce", st_v4Ice);
+	if (st_v4Ice) {
+		UI::SameLine(); st_v4IceSlope = UI::Checkbox("Ice Slopes", st_v4IceSlope);
+		UI::TextDisabled("Ice has no tilt transitions.");
+	}
 
 	UI::Separator();
 	UI::Text("\\$999\\$sRandom Track Generator V4 " + Icons::Copyright);

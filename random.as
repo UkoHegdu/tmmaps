@@ -71,7 +71,7 @@ CGameEditorPluginMap::ECardinalDirections RandomDirection()
 
 int3 RandomPoint()
 {
-	return int3(MAX_X / 2 + MathRand(-(MAX_X / 2 - (MAX_X / 2 / 6)), (MAX_X / 2 - (MAX_X / 2 / 6))), (Math::Floor(MAX_Y / 4)), MAX_Z / 2 + MathRand(-(MAX_Z / 2 - (MAX_Z / 2 / 6)), (MAX_Z / 2 - (MAX_Z / 2 / 6)))).opAdd(int3(0, MathRand(0,7)*MathRand(0,4), 0));
+	return int3(MAX_X / 2 + MathRand(-(MAX_X / 2 - (MAX_X / 2 / 6)), (MAX_X / 2 - (MAX_X / 2 / 6))), (int(Math::Floor(MAX_Y / 4))), MAX_Z / 2 + MathRand(-(MAX_Z / 2 - (MAX_Z / 2 / 6)), (MAX_Z / 2 - (MAX_Z / 2 / 6)))).opAdd(int3(0, MathRand(0,7)*MathRand(0,4), 0));
 }
 
 string RandomBlock()

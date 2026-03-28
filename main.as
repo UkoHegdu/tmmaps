@@ -1332,7 +1332,7 @@ void GenerateConnectivityPhase2(const string &in vistaName, uint maxBlocks = 0)
 	while (!map.IsEditorReadyForRequest) { yield(); }
 
 	// Same position formula as track generator (RandomPoint center, no random offset)
-	int3 testPos = int3(MAX_X / 2, Math::Floor(MAX_Y / 4), MAX_Z / 2);
+	int3 testPos = int3(MAX_X / 2, int(Math::Floor(MAX_Y / 4)), MAX_Z / 2);
 	TGprint("Using test position: " + tostring(testPos) + " (same as track generator)");
 
 	// Results: parallel arrays for block names and their followers
