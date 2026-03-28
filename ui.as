@@ -2,6 +2,8 @@ bool HAS_ADVANCED_EDITOR = false;
 
 //vars
 bool display = false, preloaded = false;
+// Debug block removal tool state
+int g_dbgRemX = 0, g_dbgRemY = 0, g_dbgRemZ = 0;
 int g_checkDirProbeIdx = 0;
 const array<string> CHECK_DIR_LABELS = {
 	"1 · Straight",
@@ -140,32 +142,60 @@ void RenderTrackGenerator()
 	st_maxBlocks = UI::SliderInt("\\$bbbblocks (excluding start and finish)", st_maxBlocks, 5, 100);
 
 	UI::Separator();
-	UI::Markdown("**Surface Types**");
-	UI::TextDisabled("Place a RoadTechStart block first, then Generate.");
-	st_v4Slope = UI::Checkbox("Slopes", st_v4Slope);
-	UI::SameLine();
-	st_v4Tilt = UI::Checkbox("Tilt / Banking", st_v4Tilt);
-	if (!st_v4Slope && !st_v4Tilt) UI::TextDisabled("Flat only.");
-	st_v4Special = UI::Checkbox("Special blocks \\$bbb(turbo, boost, no-engine, etc.)", st_v4Special);
-	st_v4Ramps   = UI::Checkbox("Ramp blocks", st_v4Ramps);
-
-	UI::Separator();
-	UI::Markdown("**Surface Mix** \\$bbb(transitions inserted automatically)");
-	st_v4Dirt = UI::Checkbox("RoadDirt", st_v4Dirt);
+	UI::Markdown("**Surface Mix** *(transitions inserted automatically)*");
+	UI::TextDisabled("Start block is placed automatically based on surface selection. If none selected, defaults to PlatformTech.");
+	st_v4Tech = UI::Checkbox("Road Tech", st_v4Tech);
+	if (st_v4Tech) {
+		UI::SameLine(); st_v4Slope = UI::Checkbox("Tech Slopes", st_v4Slope);
+		UI::SameLine(); st_v4Tilt  = UI::Checkbox("Tech Tilt",   st_v4Tilt);
+	}
+	st_v4Dirt = UI::Checkbox("Road Dirt", st_v4Dirt);
 	if (st_v4Dirt) {
 		UI::SameLine(); st_v4DirtSlope = UI::Checkbox("Dirt Slopes", st_v4DirtSlope);
 		UI::SameLine(); st_v4DirtTilt  = UI::Checkbox("Dirt Tilt",   st_v4DirtTilt);
 	}
-	st_v4Bump = UI::Checkbox("RoadBump", st_v4Bump);
+	st_v4Bump = UI::Checkbox("Sausage", st_v4Bump);
 	if (st_v4Bump) {
-		UI::SameLine(); st_v4BumpSlope = UI::Checkbox("Bump Slopes", st_v4BumpSlope);
-		UI::SameLine(); st_v4BumpTilt  = UI::Checkbox("Bump Tilt",   st_v4BumpTilt);
+		UI::SameLine(); st_v4BumpSlope = UI::Checkbox("Sausage Slopes", st_v4BumpSlope);
+		UI::SameLine(); st_v4BumpTilt  = UI::Checkbox("Sausage Tilt",   st_v4BumpTilt);
 	}
-	st_v4Ice = UI::Checkbox("RoadIce", st_v4Ice);
+	st_v4Ice = UI::Checkbox("Road Ice", st_v4Ice);
 	if (st_v4Ice) {
 		UI::SameLine(); st_v4IceSlope = UI::Checkbox("Ice Slopes", st_v4IceSlope);
 		UI::TextDisabled("Ice has no tilt transitions.");
 	}
+
+	UI::Separator();
+	UI::Markdown("**Platform**");
+	st_v4PlatformTech = UI::Checkbox("Platform Tech", st_v4PlatformTech);
+	if (st_v4PlatformTech) {
+		UI::SameLine(); st_v4PlatformTechSlope = UI::Checkbox("Tech Slopes##plat", st_v4PlatformTechSlope);
+		UI::SameLine(); st_v4PlatformTechTilt  = UI::Checkbox("Tech Tilt##plat",   st_v4PlatformTechTilt);
+	}
+	st_v4PlatformDirt = UI::Checkbox("Platform Dirt", st_v4PlatformDirt);
+	if (st_v4PlatformDirt) {
+		UI::SameLine(); st_v4PlatformDirtSlope = UI::Checkbox("Dirt Slopes##plat", st_v4PlatformDirtSlope);
+		UI::SameLine(); st_v4PlatformDirtTilt  = UI::Checkbox("Dirt Tilt##plat",   st_v4PlatformDirtTilt);
+	}
+	st_v4PlatformIce = UI::Checkbox("Platform Ice", st_v4PlatformIce);
+	if (st_v4PlatformIce) {
+		UI::SameLine(); st_v4PlatformIceSlope = UI::Checkbox("Ice Slopes##plat", st_v4PlatformIceSlope);
+		UI::SameLine(); st_v4PlatformIceTilt  = UI::Checkbox("Ice Tilt##plat",   st_v4PlatformIceTilt);
+	}
+	st_v4PlatformGrass = UI::Checkbox("Platform Grass", st_v4PlatformGrass);
+	if (st_v4PlatformGrass) {
+		UI::SameLine(); st_v4PlatformGrassSlope = UI::Checkbox("Grass Slopes##plat", st_v4PlatformGrassSlope);
+		UI::SameLine(); st_v4PlatformGrassTilt  = UI::Checkbox("Grass Tilt##plat",   st_v4PlatformGrassTilt);
+	}
+	st_v4PlatformPlastic = UI::Checkbox("Platform Plastic", st_v4PlatformPlastic);
+	if (st_v4PlatformPlastic) {
+		UI::SameLine(); st_v4PlatformPlasticSlope = UI::Checkbox("Plastic Slopes##plat", st_v4PlatformPlasticSlope);
+		UI::SameLine(); st_v4PlatformPlasticTilt  = UI::Checkbox("Plastic Tilt##plat",   st_v4PlatformPlasticTilt);
+	}
+
+	UI::Separator();
+	st_v4Special = UI::Checkbox("Special blocks \\$bbb(turbo, boost, no-engine, etc.)", st_v4Special);
+	st_v4Ramps   = UI::Checkbox("Ramp blocks", st_v4Ramps);
 
 	UI::Separator();
 	UI::Text("\\$999\\$sRandom Track Generator V4 " + Icons::Copyright);
@@ -254,6 +284,19 @@ void RenderDev()
 	UI::TextDisabled("Requires editor open. Reads from and writes to: d:\\REPO\\tmmaps\\block_data\\");
 	UI::TextDisabled("Phase 2 clears the map then places blocks one by one.");
 	UI::TextDisabled("Progress every 500 blocks. Output: connectivity_<vista>.txt (overwrites)");
+
+	UI::Separator();
+	UI::Markdown("**Debug: Manual Block Removal**");
+	UI::TextDisabled("Runs the same removal logic as ClearPlaced (GetBlock → direct remove → ±6 scan).");
+	UI::SetNextItemWidth(80); g_dbgRemX = UI::InputInt("X##dbgrem", g_dbgRemX);
+	UI::SameLine();
+	UI::SetNextItemWidth(80); g_dbgRemY = UI::InputInt("Y##dbgrem", g_dbgRemY);
+	UI::SameLine();
+	UI::SetNextItemWidth(80); g_dbgRemZ = UI::InputInt("Z##dbgrem", g_dbgRemZ);
+	UI::SameLine();
+	if (UI::Button(Icons::Trash + " Remove at coord")) {
+		startnew(v4::DebugRemoveAtCoord);
+	}
 }
 
 void RenderSettings()
