@@ -224,6 +224,13 @@ CGameEditorPluginMap::ECardinalDirections g_travelDir;
 // -1 = no preference (normal behaviour). Consumed and reset inside PlaceConnected.
 int g_forceTurnDirIdx = -1;
 
+// Slope2Straight decision: forced states communicated to the Slope↔Tilt transition shortcuts.
+// Set by the S2S decision block; consumed (and cleared) inside the matching shortcut.
+// Cleared at the top of each loop iteration so stale values never carry over.
+TiltSide g_s2sForcedTiltSide = TiltSide::TiltNone;
+bool     g_s2sHasForcedSlope = false;
+SlopeDir g_s2sForcedSlopeDir = SlopeDir::SlopeUp;
+
 // ── Pool loading ─────────────────────────────────────────────────────────────
 
 string GetBlockDataPath()
@@ -884,6 +891,29 @@ int3 EnterTilt(CGameEditorPluginMap@ map, int3 prevPos, TiltSide &out side)
 	}
 	return int3(-1, -1, -1);
 }
+// Switches tilt side via a TiltSwitch block (Road surfaces only).
+// Tries normal placement then flipped. Updates `side` and returns new pos on success,
+// or int3(-1,-1,-1) on failure (caller continues with same side).
+int3 SwitchTilt(CGameEditorPluginMap@ map, int3 prevPos, TiltSide &inout side)
+{
+	TiltSide newSide = (side == TiltSide::TiltLeft) ? TiltSide::TiltRight : TiltSide::TiltLeft;
+	string block = SURF_PREFIX[int(g_surface)] + (newSide == TiltSide::TiltRight ? "TiltSwitchRight" : "TiltSwitchLeft");
+	int3 newPos = PlaceConnected(map, prevPos, block);
+	if (newPos.x >= 0) {
+		TGprint("V4 trans: TiltSwitch " + (side == TiltSide::TiltLeft ? "L→R" : "R→L") + "  " + block + " @ " + tostring(newPos) + "  dir=" + DirStr(g_travelDir));
+		side = newSide;
+		return newPos;
+	}
+	newPos = PlaceFlipped(map, prevPos, block);
+	if (newPos.x >= 0) {
+		TGprint("V4 trans: TiltSwitch(flip) " + (side == TiltSide::TiltLeft ? "L→R" : "R→L") + "  " + block + " @ " + tostring(newPos) + "  dir=" + DirStr(g_travelDir));
+		side = newSide;
+		return newPos;
+	}
+	TGprint("  → SwitchTilt: " + block + " failed from " + tostring(prevPos) + "  travelDir=" + DirStr(g_travelDir));
+	return int3(-1, -1, -1);
+}
+
 // ── Diagnostic helper ─────────────────────────────────────────────────────────
 // Called after a placement failure. Logs what connect results existed and
 // whether CanPlaceBlock succeeded for each candidate position.
@@ -1166,6 +1196,25 @@ void Run()
 			// ── Update phase ─────────────────────────────────────────────
 			phase = ComputePhase(state, slopeDir, tiltSide);
 
+			// Clear any stale S2S forced flags from a previous iteration
+			// (can be left over if run-limits prevented the forced transition).
+			g_s2sForcedTiltSide = TiltSide::TiltNone;
+			g_s2sHasForcedSlope = false;
+
+			// ── Road tilt switch ──────────────────────────────────────────
+			// After MIN_TILT_RUN, road surfaces occasionally switch tilt side
+			// in-place using a TiltSwitch block instead of exit→enter.
+			// Platform has no TiltSwitch blocks — exit+enter handles it instead.
+			if (state == SurfaceState::Tilt && IsRoadSurface(g_surface) && MathRand(0, 9) == 0) {
+				int3 p = SwitchTilt(map, prevPos, tiltSide);
+				if (p.x >= 0) {
+					prevPos = p; placed++;
+					placedCoords.InsertLast(p); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface);
+					stateRun++;
+					continue;
+				}
+			}
+
 			// ── Pick target ───────────────────────────────────────────────
 
 			int wFlat  = 60;
@@ -1219,6 +1268,59 @@ void Run()
 					targetBlock = PickFiltered(left ? tiltLeftPool : tiltRightPool, left ? tiltLeftBasePool : tiltRightBasePool);
 				} else {
 					targetBlock = PickFiltered(tiltPool, tiltLeftBasePool);
+				}
+			}
+
+			// ── Slope2Straight decision ───────────────────────────────────
+			// When the last placed block is a Slope2Straight, override the normal
+			// target pick with a weighted menu of continuation options.
+			// Weights: 4/7 continue (a), 1/7 chain another S2S (b),
+			//          1/7 tilt-right or slope-up (c1/d1), 1/7 tilt-left or slope-down (c2/d2).
+			{
+				string s2s = GetSlope2Straight();
+				if (s2s.Length > 0 && (state == SurfaceState::Slope || state == SurfaceState::Tilt)
+					&& placedCoords.Length > 0) {
+					auto lastB = GetBlockAt(map, placedCoords[placedCoords.Length - 1]);
+					if (lastB !is null && lastB.BlockModel.IdName == s2s) {
+						int droll = MathRand(0, 6); // 0–3 = continue, 4 = chain, 5 = right/up, 6 = left/down
+						if (droll == 4) {
+							// b) Chain another Slope2Straight in the current direction.
+							targetBlock = s2s;
+							targetState = state;
+							TGprint("V4 S2S: option b — chain Slope2Straight");
+						} else if (droll == 5) {
+							if (state == SurfaceState::Slope) {
+								// c1) Slope → TiltRight
+								g_s2sForcedTiltSide = TiltSide::TiltRight;
+								targetState = SurfaceState::Tilt;
+								targetBlock = tiltRightPool.Length > 0 ? PickFromPool(tiltRightPool) : PickFromPool(tiltPool);
+								TGprint("V4 S2S: option c1 — Slope→TiltRight");
+							} else {
+								// d1) Tilt → SlopeUp
+								g_s2sHasForcedSlope = true;
+								g_s2sForcedSlopeDir = SlopeDir::SlopeUp;
+								targetState = SurfaceState::Slope;
+								targetBlock = slopeUpPool.Length > 0 ? PickFromPool(slopeUpPool) : PickFromPool(slopePool);
+								TGprint("V4 S2S: option d1 — Tilt→SlopeUp");
+							}
+						} else if (droll == 6) {
+							if (state == SurfaceState::Slope) {
+								// c2) Slope → TiltLeft
+								g_s2sForcedTiltSide = TiltSide::TiltLeft;
+								targetState = SurfaceState::Tilt;
+								targetBlock = tiltLeftPool.Length > 0 ? PickFromPool(tiltLeftPool) : PickFromPool(tiltPool);
+								TGprint("V4 S2S: option c2 — Slope→TiltLeft");
+							} else {
+								// d2) Tilt → SlopeDown
+								g_s2sHasForcedSlope = true;
+								g_s2sForcedSlopeDir = SlopeDir::SlopeDown;
+								targetState = SurfaceState::Slope;
+								targetBlock = slopeDownPool.Length > 0 ? PickFromPool(slopeDownPool) : PickFromPool(slopePool);
+								TGprint("V4 S2S: option d2 — Tilt→SlopeDown");
+							}
+						}
+						// droll 0–3: keep existing pick (option a — continue current state)
+					}
 				}
 			}
 
@@ -1312,8 +1414,14 @@ void Run()
 				auto lastB = (placedCoords.Length > 0) ? GetBlockAt(map, placedCoords[placedCoords.Length - 1]) : null;
 				string lastBName = (lastB !is null) ? lastB.BlockModel.IdName : "";
 				if (s2s.Length > 0 && lastBName == s2s) {
-					// Derive tiltSide from slopeDir: SlopeUp→TiltLeft, SlopeDown→TiltRight.
-					tiltSide = (slopeDir == SlopeDir::SlopeUp) ? TiltSide::TiltLeft : TiltSide::TiltRight;
+					// Derive tiltSide from slopeDir (SlopeUp→TiltLeft, SlopeDown→TiltRight),
+					// unless the S2S decision pre-set a specific side (options c1/c2).
+					if (g_s2sForcedTiltSide != TiltSide::TiltNone) {
+						tiltSide = g_s2sForcedTiltSide;
+						g_s2sForcedTiltSide = TiltSide::TiltNone;
+					} else {
+						tiltSide = (slopeDir == SlopeDir::SlopeUp) ? TiltSide::TiltLeft : TiltSide::TiltRight;
+					}
 					TGprint("V4 trans: Slope->Tilt shortcut via Slope2Straight (no transition block)  tiltSide=" + (tiltSide == TiltSide::TiltLeft ? "L" : "R"));
 					state = SurfaceState::Tilt; stateRun = 0; flatRun = 0;
 					array<string>@ sp = (tiltSide == TiltSide::TiltLeft) ? tiltLeftPool : tiltRightPool;
@@ -1341,8 +1449,14 @@ void Run()
 				auto lastB = (placedCoords.Length > 0) ? GetBlockAt(map, placedCoords[placedCoords.Length - 1]) : null;
 				string lastBName = (lastB !is null) ? lastB.BlockModel.IdName : "";
 				if (s2s.Length > 0 && lastBName == s2s) {
-					// Derive slopeDir from travel direction through the Slope2Straight: N=up, S=down.
-					slopeDir = (g_travelDir == CGameEditorPluginMap::ECardinalDirections::North) ? SlopeDir::SlopeUp : SlopeDir::SlopeDown;
+					// Derive slopeDir from travel direction (N=up, S=down),
+					// unless the S2S decision pre-set a specific direction (options d1/d2).
+					if (g_s2sHasForcedSlope) {
+						slopeDir = g_s2sForcedSlopeDir;
+						g_s2sHasForcedSlope = false;
+					} else {
+						slopeDir = (g_travelDir == CGameEditorPluginMap::ECardinalDirections::North) ? SlopeDir::SlopeUp : SlopeDir::SlopeDown;
+					}
 					TGprint("V4 trans: Tilt->Slope shortcut via Slope2Straight (no transition block)  slopeDir=" + (slopeDir == SlopeDir::SlopeUp ? "Up" : "Down"));
 					state = SurfaceState::Slope; stateRun = 0; flatRun = 0;
 					array<string>@ sp = (slopeDir == SlopeDir::SlopeUp) ? slopeUpPool : slopeDownPool;

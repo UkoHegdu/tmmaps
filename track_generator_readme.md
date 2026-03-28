@@ -6,11 +6,14 @@
 
 Each loop iteration:
 1. Compute `phase` from `state + slopeDir + tiltSide`.
-2. Pick `targetState` and `targetBlock` from the matching pool (weighted random).
-3. Enforce min/max run limits.
-4. If `state != targetState`, insert transition blocks (`EnterSlope`, `ExitSlope`, `EnterTilt`, `ExitTilt`). **Exception:** on Platform surfaces, if the last body block is `Slope2Straight` and the transition is Slope↔Tilt, no transition blocks are placed — see *Platform Slope↔Tilt shortcut* below.
-5. If `BlockSurface(targetBlock) != g_surface`, insert surface transition block(s).
-6. Place `targetBlock`. On failure, run the fallback chain.
+2. Clear stale S2S forced flags from the previous iteration.
+3. **Road tilt switch check** — if in tilt on a Road surface, 10% chance to place a `TiltSwitch` block and flip `tiltSide` in-place; `continue` on success (skip normal pick).
+4. Pick `targetState` and `targetBlock` from the matching pool (weighted random).
+5. **Slope2Straight decision** — if the last placed block is `Slope2Straight`, apply a weighted override to the pick (see *Slope2Straight decision* below).
+6. Enforce min/max run limits.
+7. If `state != targetState`, insert transition blocks (`EnterSlope`, `ExitSlope`, `EnterTilt`, `ExitTilt`). **Exception:** on Platform surfaces, if the last body block is `Slope2Straight` and the transition is Slope↔Tilt, no transition blocks are placed — see *Platform Slope↔Tilt shortcut* below.
+8. If `BlockSurface(targetBlock) != g_surface`, insert surface transition block(s).
+9. Place `targetBlock`. On failure, run the fallback chain.
 
 ---
 
@@ -100,6 +103,18 @@ The tilt transition block is bidirectional — one orientation has the flat face
 
 Body blocks use side-specific pools (`tiltLeftPool` / `tiltRightPool`) so the banking direction stays consistent through the section.
 
+#### Road tilt switch
+
+While in tilt, each iteration has a 10% chance of placing a `TiltSwitch` block (`RoadTech*TiltSwitchLeft` or `RoadTech*TiltSwitchRight`) instead of a normal body block. The switch flips `tiltSide` in-place — no `ExitTilt`/`EnterTilt` is needed. `SwitchTilt` tries `PlaceConnected` then `PlaceFlipped`; on failure the normal iteration proceeds unchanged.
+
+`TiltSwitchRight` is used when switching *to* TiltRight; `TiltSwitchLeft` when switching *to* TiltLeft. The block name is constructed from `SURF_PREFIX[g_surface]` so the correct surface variant is used automatically.
+
+TiltSwitch blocks are excluded from `tiltLeftPool`/`tiltRightPool` (they would break side-tracking if picked as ordinary body blocks).
+
+### Platform surfaces — tilt switching
+
+Platform has no TiltSwitch blocks. To change bank direction, the section exits tilt (`ExitTilt`) and re-enters (`EnterTilt`), which randomly selects a side. The side-specific pools prevent unintended cross-side block mixing during a section.
+
 ### Platform surfaces
 
 Platform tilt uses dedicated `TiltTransition1UpLeft/Right` and `TiltTransition1DownLeft/Right` blocks (distinct per side, same as Road). All four Platform surfaces (Tech, Dirt, Ice, Grass) have their own equivalents with identical connectivity behaviour — only the visual skin differs.
@@ -110,9 +125,29 @@ Side-specific body blocks (checkpoint, specials) use `Slope2Left`/`Slope2Right` 
 
 #### Platform Slope↔Tilt shortcut
 
-`Slope2Straight` is simultaneously a slope block (traversed N↔S) and a tilt block (traversed E↔W). When the last placed body block is `Slope2Straight` and the run minimum has been met, the Slope→Tilt and Tilt→Slope transitions skip `ExitSlope`/`ExitTilt` + `EnterTilt`/`EnterSlope` entirely — no transition blocks are placed. The state is flipped directly and the next body block is picked from the new pool. `PlaceConnected` then connects it to whichever face of the `Slope2Straight` fits.
+`Slope2Straight` is simultaneously a slope block (traversed N↔S) and a tilt block (traversed E↔W). When the last placed body block is `Slope2Straight`, the Slope→Tilt and Tilt→Slope transitions skip `ExitSlope`/`ExitTilt` + `EnterTilt`/`EnterSlope` entirely — no transition blocks are placed. The state is flipped directly and the next body block is picked from the new pool. `PlaceConnected` then connects it to whichever face of the `Slope2Straight` fits.
 
 `GetSlope2Straight()` returns `"Platform*Slope2Straight"` for Platform surfaces and `""` for Road, so the shortcut is inert on Road.
+
+---
+
+## Slope2Straight decision
+
+When the last placed body block is a `Slope2Straight` (Platform only), the normal target pick is replaced by a weighted menu:
+
+| Roll (0–6) | Weight | Option | Effect |
+|---|---|---|---|
+| 0–3 | 4/7 | **a** continue | Keep the normal pick — stay in Slope or Tilt |
+| 4 | 1/7 | **b** chain | Place another `Slope2Straight` in the current direction, then re-evaluate |
+| 5 | 1/7 | **c1 / d1** | Slope→TiltRight (c1) or Tilt→SlopeUp (d1) |
+| 6 | 1/7 | **c2 / d2** | Slope→TiltLeft (c2) or Tilt→SlopeDown (d2) |
+
+Options c and d use the Slope↔Tilt shortcut (no transition blocks). To force a specific side/direction the decision sets one of two global flags before the transition section runs:
+
+- `g_s2sForcedTiltSide` — consumed by the Slope→Tilt shortcut; overrides the default `slopeDir`-derived mapping.
+- `g_s2sHasForcedSlope` / `g_s2sForcedSlopeDir` — consumed by the Tilt→Slope shortcut; overrides the default `g_travelDir`-derived mapping.
+
+Both flags are cleared at the top of each iteration so a stale value from a blocked transition (e.g. overridden by run limits) never carries over.
 
 ---
 
