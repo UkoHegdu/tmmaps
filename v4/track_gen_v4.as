@@ -1455,7 +1455,8 @@ void Run()
 			}
 			if (state == SurfaceState::Tilt && stateRun < MIN_TILT_RUN && targetState != SurfaceState::Tilt) {
 				targetState = SurfaceState::Tilt;
-				targetBlock = PickFromPool(tiltPool);
+				array<string>@ minPool = (tiltSide == TiltSide::TiltLeft) ? tiltLeftPool : tiltRightPool;
+				targetBlock = PickFromPool(minPool);
 			}
 			if (state == SurfaceState::Slope && stateRun >= MAX_SLOPE_RUN && targetState != SurfaceState::Flat) {
 				targetState = SurfaceState::Flat;
@@ -1857,7 +1858,10 @@ void Run()
 						g_travelDir = afterSlopeEndDir;
 						TGprint("  slope-escape: restored g_travelDir=" + DirStr(g_travelDir) + " (actual physical direction)");
 
-						string escFlat = PickFromPool(flatPool);
+						// Always use the straight — a level-drop escape needs a small block that
+						// fits wherever it lands; a random flat pick can roll a large curve that
+						// won't connect (the failure that aborted the escape). Fancier selection later.
+						string escFlat = GetStraight();
 						TGprint("  slope-escape: trying flat " + escFlat + " from " + tostring(p2));
 						int3 p3 = PlaceConnected(map, p2, escFlat);
 						if (p3.x < 0) {
