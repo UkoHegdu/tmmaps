@@ -16,7 +16,8 @@ const array<string> CHECK_DIR_LABELS = {
 	"8 · Dirt Straight",
 	"9 · Dirt SlopeStart 2x1",
 	"10 · Dirt SlopeEnd 2x1",
-	"11 · Dirt SlopeStraight"
+	"11 · Dirt SlopeStraight",
+	"12 · TiltCurve2Out"
 };
 const array<string> CHECK_DIR_BLOCKS = {
 	"RoadTechStraight",
@@ -29,10 +30,11 @@ const array<string> CHECK_DIR_BLOCKS = {
 	"RoadDirtStraight",
 	"RoadDirtSlopeStart2x1",
 	"RoadDirtSlopeEnd2x1",
-	"RoadDirtSlopeStraight"
+	"RoadDirtSlopeStraight",
+	"RoadTechTiltCurve2Out"
 };
 bool tabTrack = true, tabScenery = false, tabSettings = false, tabDev = false;
-int st_maxBlocks = 45;
+int st_maxBlocks = 200;
 //--
 
 void RenderMenu()
@@ -139,7 +141,7 @@ void RenderTrackGenerator()
 
 	UI::Separator();
 	UI::Markdown("**Block Count**");
-	st_maxBlocks = UI::SliderInt("\\$bbbblocks (excluding start and finish)", st_maxBlocks, 5, 100);
+	st_maxBlocks = UI::SliderInt("\\$bbbblocks (excluding start and finish)", st_maxBlocks, 5, 200);
 
 	UI::Separator();
 	st_stadiumMode = UI::Checkbox("Stadium Mode \\$bbb(48×48 arena — avoids walls, no Curve5)", st_stadiumMode);

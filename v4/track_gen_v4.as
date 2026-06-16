@@ -624,6 +624,77 @@ ConnectCacheEntry@ GetConnectCache(CGameEditorPluginMap@ map, CGameCtnBlock@ pre
     return entry;
 }
 
+// Detect the real travel heading out of a just-placed block by probing its open
+// exit socket — instead of trusting the placement's orientation stamp (`dir`),
+// which is the block's ROTATION, not its travel direction. They coincide for
+// straights but differ for curves/tilt-curves, which is what desynced g_travelDir.
+//
+// Probes the current surface's straight variants (flat, tilt, slope). Only the
+// probe matching the exit's surface mates; the others return nothing and are
+// skipped, so we don't need to know the section state at the call site.
+//
+// Heading rule: a result's `dir` is the heading if stepping one cell in `dir`
+// (MoveDir) moves AWAY from prevPos (the entry side). The first qualifying result
+// wins — blocks with one entry and two forward exits just take the first.
+//
+// Returns `fallback` if no usable exit is found (e.g. a true straight-through
+// transition block, or an unmappable shape) so behaviour never gets worse.
+CGameEditorPluginMap::ECardinalDirections DetectHeading(
+	CGameEditorPluginMap@ map, int3 placedPos, int3 prevPos,
+	const string &in blockName, CGameEditorPluginMap::ECardinalDirections fallback)
+{
+	auto placedBlock = GetBlockAt(map, placedPos);
+	if (placedBlock is null) return fallback;
+
+	// Order probes by the placed block's own type so the common case is a SINGLE
+	// GetConnectResults call (flat body → flat straight first, tilt body → tilt
+	// straight first, etc.). Transition blocks (Transition/SlopeStart/SlopeEnd) don't
+	// advertise their exit surface in the name, so the other straights are always kept
+	// as fallbacks and we take the first probe that actually mates the exit.
+	string flatStr  = GetStraight();
+	string tiltStr  = SURF_PREFIX[int(g_surface)] + "TiltStraight";
+	string slopeStr = SURF_PREFIX[int(g_surface)] + "SlopeStraight";
+	bool isTrans = blockName.IndexOf("Transition") >= 0
+	            || blockName.IndexOf("SlopeStart")  >= 0
+	            || blockName.IndexOf("SlopeEnd")    >= 0;
+	array<string> probes;
+	if (!isTrans && blockName.IndexOf("Tilt") >= 0) {
+		probes.InsertLast(tiltStr); probes.InsertLast(flatStr); probes.InsertLast(slopeStr);
+	} else if (!isTrans && blockName.IndexOf("Slope") >= 0) {
+		probes.InsertLast(slopeStr); probes.InsertLast(flatStr); probes.InsertLast(tiltStr);
+	} else {
+		probes.InsertLast(flatStr); probes.InsertLast(tiltStr); probes.InsertLast(slopeStr);
+	}
+	for (uint p = 0; p < probes.Length; p++) {
+		auto probeInfo = map.GetBlockModelFromName(probes[p]);
+		if (probeInfo is null) continue;
+		while (!map.IsEditorReadyForRequest) { yield(); }
+		map.GetConnectResults(placedBlock, probeInfo);
+		while (!map.IsEditorReadyForRequest) { yield(); }
+		for (uint r = 0; r < map.ConnectResults.Length; r++) {
+			auto res = map.ConnectResults[r];
+			if (res is null || !res.CanPlace) continue;
+			auto dir = ConvertDir(res.Dir);
+			int3 c   = res.Coord;
+			// The probe is a STRAIGHT, so its orientation reliably gives the travel AXIS
+			// (N/S → Z, E/W → X) — but NOT the sign (a straight reports both rotations,
+			// and `dir` is orientation, not heading). Take the sign from the exit coord
+			// relative to prevPos: heading points from the entry (near prevPos) outward.
+			bool zAxis = (dir == CGameEditorPluginMap::ECardinalDirections::North
+			           || dir == CGameEditorPluginMap::ECardinalDirections::South);
+			if (zAxis) {
+				if (c.z > prevPos.z) return CGameEditorPluginMap::ECardinalDirections::North;
+				if (c.z < prevPos.z) return CGameEditorPluginMap::ECardinalDirections::South;
+			} else {
+				if (c.x > prevPos.x) return CGameEditorPluginMap::ECardinalDirections::West;
+				if (c.x < prevPos.x) return CGameEditorPluginMap::ECardinalDirections::East;
+			}
+			// Axis difference is zero (ambiguous) — try the next result / probe.
+		}
+	}
+	return fallback;
+}
+
 // Place blockName connected to prevPos. travelDir is the intended forward direction;
 // it is updated to the direction of the placed block after success.
 // Pass 1: exact match — asymmetric blocks (ramps, CPs) always face correctly.
@@ -656,6 +727,20 @@ int3 PlaceConnected(CGameEditorPluginMap@ map, int3 prevPos, const string &in bl
 	auto backDir   = IntToDir((DirToInt(preferDir) + 2) % 4);
 	ConnectCacheEntry@ c = GetConnectCache(map, prevBlock, prevPos, blockName, info);
 
+	// TEMP DIAGNOSTIC: dump the (dir, coord) candidates the passes will consider.
+	// Only CanPlace=true results are cached, so this is exactly the list passes 1/2/3 walk.
+	// Remove once the g_travelDir desync is diagnosed.
+	{
+		string cand = "    [candidates] " + blockName + " from " + prevBlock.BlockModel.IdName
+			+ "  (prefer=" + DirStr(preferDir) + "  back=" + DirStr(backDir) + "):";
+		for (uint r = 0; r < c.dirs.Length; r++) {
+			int3 cc = int3(prevPos.x + c.offsets[r].x, prevPos.y + c.offsets[r].y, prevPos.z + c.offsets[r].z);
+			cand += "  " + DirStr(c.dirs[r]) + "@" + tostring(cc);
+		}
+		if (c.dirs.Length == 0) cand += " (none)";
+		TGprint(cand);
+	}
+
 	// Consume forced turn direction (set by caller for curve blocks).
 	int forceDirIdx = g_forceTurnDirIdx;
 	g_forceTurnDirIdx = -1;
@@ -667,8 +752,11 @@ int3 PlaceConnected(CGameEditorPluginMap@ map, int3 prevPos, const string &in bl
 		if (dir != preferDir) continue;
 		uint preLen = GetApp().RootMap.Blocks.Length;
 		if (PlaceBlock(map, blockName, dir, coord)) {
-			g_travelDir = dir;
-			return FindNewlyPlacedBlock(blockName, preLen, coord);
+			int3 placed = FindNewlyPlacedBlock(blockName, preLen, coord);
+			// Heading from the block's actual exit geometry, not the orientation stamp `dir`.
+			// Falls back to `dir` if no usable exit is found.
+			g_travelDir = DetectHeading(map, placed, prevPos, blockName, dir);
+			return placed;
 		}
 	}
 
@@ -696,8 +784,11 @@ int3 PlaceConnected(CGameEditorPluginMap@ map, int3 prevPos, const string &in bl
 		if (dir == backDir) continue;
 		uint preLen = GetApp().RootMap.Blocks.Length;
 		if (PlaceBlock(map, blockName, dir, coord)) {
-			g_travelDir = dir;
-			return FindNewlyPlacedBlock(blockName, preLen, coord);
+			int3 placed = FindNewlyPlacedBlock(blockName, preLen, coord);
+			// Heading from the block's actual exit geometry, not the orientation stamp `dir`.
+			// Falls back to `dir` if no usable exit is found.
+			g_travelDir = DetectHeading(map, placed, prevPos, blockName, dir);
+			return placed;
 		}
 	}
 
@@ -710,9 +801,13 @@ int3 PlaceConnected(CGameEditorPluginMap@ map, int3 prevPos, const string &in bl
 		if (dir != backDir) continue;
 		uint preLen = GetApp().RootMap.Blocks.Length;
 		if (PlaceBlock(map, blockName, dir, coord)) {
-			// Don't update g_travelDir to backDir — the block physically goes straight.
 			int3 placed = FindNewlyPlacedBlock(blockName, preLen, coord);
-			TGprint("    PlaceConnected pass3 (backDir): placed " + blockName + " @ " + tostring(placed) + "  dir=" + DirStr(dir) + "  g_travelDir unchanged=" + DirStr(g_travelDir));
+			// dir == backDir here, so it's never a valid heading. Detect the real heading
+			// from the block's exit; fall back to the current g_travelDir (the old freeze
+			// behavior) if no usable exit is found — true straight-through transition blocks.
+			auto detected = DetectHeading(map, placed, prevPos, blockName, g_travelDir);
+			g_travelDir = detected;
+			TGprint("    PlaceConnected pass3 (backDir): placed " + blockName + " @ " + tostring(placed) + "  dir=" + DirStr(dir) + "  detectedHeading=" + DirStr(detected));
 			return placed;
 		}
 	}
