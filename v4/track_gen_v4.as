@@ -41,6 +41,13 @@ const int SURF_SWITCH_CHANCE = 20; // percent chance per flat block to try a sur
 
 const string RAMP_ESCAPE = "RoadTechRampLow";
 
+// Stadium mode wall boundaries (block coords) and avoidance thresholds.
+// Safe playable range: X in [2..45], Z in [2..45].
+const int STADIUM_WALL_MIN  = 2;
+const int STADIUM_WALL_MAX  = 45;
+const int STADIUM_EXIT_DIST = 10;  // exit slope/tilt when fewer than this blocks ahead
+const int STADIUM_TURN_DIST = 5;   // force a turn when fewer than this blocks ahead (flat)
+
 // ── Per-surface data tables (indexed by Surface enum value) ──────────────────
 // Add a new surface: extend each table, add a pool file, add settings + UI.
 
@@ -224,12 +231,10 @@ CGameEditorPluginMap::ECardinalDirections g_travelDir;
 // -1 = no preference (normal behaviour). Consumed and reset inside PlaceConnected.
 int g_forceTurnDirIdx = -1;
 
-// Slope2Straight decision: forced states communicated to the Slope↔Tilt transition shortcuts.
-// Set by the S2S decision block; consumed (and cleared) inside the matching shortcut.
-// Cleared at the top of each loop iteration so stale values never carry over.
-TiltSide g_s2sForcedTiltSide = TiltSide::TiltNone;
-bool     g_s2sHasForcedSlope = false;
-SlopeDir g_s2sForcedSlopeDir = SlopeDir::SlopeUp;
+// Slope2Straight forced-transition state lives as loop-local variables inside Run()
+// (s2sForcedTiltSide / s2sHasForcedSlope / s2sForcedSlopeDir) — it is set by the S2S
+// decision block and consumed by the matching Slope↔Tilt shortcut within the same
+// iteration, so it does not need to be (and no longer is) global.
 
 // ── Pool loading ─────────────────────────────────────────────────────────────
 
@@ -253,6 +258,18 @@ string DirStr(CGameEditorPluginMap::ECardinalDirections d)
 		case CGameEditorPluginMap::ECardinalDirections::West:  return "W";
 	}
 	return "?";
+}
+
+// Distance from pos to the wall ahead in dir, using the stadium safe margins.
+int StadiumDistAhead(int3 pos, CGameEditorPluginMap::ECardinalDirections dir)
+{
+	switch(dir) {
+		case CGameEditorPluginMap::ECardinalDirections::North: return STADIUM_WALL_MAX - pos.z;
+		case CGameEditorPluginMap::ECardinalDirections::South: return pos.z - STADIUM_WALL_MIN;
+		case CGameEditorPluginMap::ECardinalDirections::East:  return pos.x - STADIUM_WALL_MIN;
+		case CGameEditorPluginMap::ECardinalDirections::West:  return STADIUM_WALL_MAX - pos.x;
+	}
+	return 999;
 }
 
 bool IsTiltDirectedCurve(const string &in blockName)
@@ -298,6 +315,9 @@ void LoadPools()
 
 			// Respect the ramp blocks toggle
 			if (!st_v4Ramps && line.IndexOf("Ramp") >= 0) continue;
+
+			// Stadium mode: exclude Curve5 (too large for the arena)
+			if (st_stadiumMode && line.IndexOf("Curve5") >= 0) continue;
 
 			if (section == "FLAT") {
 				flatPool.InsertLast(line);
@@ -353,6 +373,7 @@ void LoadPools()
 				if (xsec == "EXCLUDED" || xsec == "SLOPE_TRANS" || xsec == "TILT_TRANS") continue;
 				if (!st_v4Special && line.IndexOf("Special") >= 0) continue;
 				if (!st_v4Ramps   && line.IndexOf("Ramp")    >= 0) continue;
+				if (st_stadiumMode && line.IndexOf("Curve5")  >= 0) continue;
 				if (xsec == "FLAT") {
 					flatPool.InsertLast(line);
 				} else if (xsec == "SLOPE" && xSlope[xi]) {
@@ -455,7 +476,7 @@ string GetSlopeEnd()       { return SURF_SLOPE_END[int(g_surface)]; }
 string GetSlope2Straight() {
     int s = int(g_surface);
     if (s < int(Surface::SurfacePlatformTech)) return "";
-    return SURF_NAME[s] + "Slope2Straight";
+    return SURF_PREFIX[s] + "Slope2Straight";
 }
 string GetTiltUpLeft()     { return SURF_TILT_UP_LEFT[int(g_surface)]; }
 string GetTiltUpRight()    { return SURF_TILT_UP_RIGHT[int(g_surface)]; }
@@ -894,23 +915,24 @@ int3 EnterTilt(CGameEditorPluginMap@ map, int3 prevPos, TiltSide &out side)
 // Switches tilt side via a TiltSwitch block (Road surfaces only).
 // Tries normal placement then flipped. Updates `side` and returns new pos on success,
 // or int3(-1,-1,-1) on failure (caller continues with same side).
-int3 SwitchTilt(CGameEditorPluginMap@ map, int3 prevPos, TiltSide &inout side)
+int3 SwitchTilt(CGameEditorPluginMap@ map, int3 prevPos, TiltSide curSide, TiltSide &out side)
 {
-	TiltSide newSide = (side == TiltSide::TiltLeft) ? TiltSide::TiltRight : TiltSide::TiltLeft;
+	TiltSide newSide = (curSide == TiltSide::TiltLeft) ? TiltSide::TiltRight : TiltSide::TiltLeft;
 	string block = SURF_PREFIX[int(g_surface)] + (newSide == TiltSide::TiltRight ? "TiltSwitchRight" : "TiltSwitchLeft");
 	int3 newPos = PlaceConnected(map, prevPos, block);
 	if (newPos.x >= 0) {
-		TGprint("V4 trans: TiltSwitch " + (side == TiltSide::TiltLeft ? "L→R" : "R→L") + "  " + block + " @ " + tostring(newPos) + "  dir=" + DirStr(g_travelDir));
+		TGprint("V4 trans: TiltSwitch " + (curSide == TiltSide::TiltLeft ? "L→R" : "R→L") + "  " + block + " @ " + tostring(newPos) + "  dir=" + DirStr(g_travelDir));
 		side = newSide;
 		return newPos;
 	}
 	newPos = PlaceFlipped(map, prevPos, block);
 	if (newPos.x >= 0) {
-		TGprint("V4 trans: TiltSwitch(flip) " + (side == TiltSide::TiltLeft ? "L→R" : "R→L") + "  " + block + " @ " + tostring(newPos) + "  dir=" + DirStr(g_travelDir));
+		TGprint("V4 trans: TiltSwitch(flip) " + (curSide == TiltSide::TiltLeft ? "L→R" : "R→L") + "  " + block + " @ " + tostring(newPos) + "  dir=" + DirStr(g_travelDir));
 		side = newSide;
 		return newPos;
 	}
 	TGprint("  → SwitchTilt: " + block + " failed from " + tostring(prevPos) + "  travelDir=" + DirStr(g_travelDir));
+	side = curSide;
 	return int3(-1, -1, -1);
 }
 
@@ -1196,17 +1218,18 @@ void Run()
 			// ── Update phase ─────────────────────────────────────────────
 			phase = ComputePhase(state, slopeDir, tiltSide);
 
-			// Clear any stale S2S forced flags from a previous iteration
-			// (can be left over if run-limits prevented the forced transition).
-			g_s2sForcedTiltSide = TiltSide::TiltNone;
-			g_s2sHasForcedSlope = false;
+			// S2S forced-transition state — local to this iteration, so stale values
+			// from a previous loop can never carry over (no globals involved).
+			TiltSide s2sForcedTiltSide = TiltSide::TiltNone;
+			bool     s2sHasForcedSlope = false;
+			SlopeDir s2sForcedSlopeDir = SlopeDir::SlopeUp;
 
 			// ── Road tilt switch ──────────────────────────────────────────
 			// After MIN_TILT_RUN, road surfaces occasionally switch tilt side
 			// in-place using a TiltSwitch block instead of exit→enter.
 			// Platform has no TiltSwitch blocks — exit+enter handles it instead.
 			if (state == SurfaceState::Tilt && IsRoadSurface(g_surface) && MathRand(0, 9) == 0) {
-				int3 p = SwitchTilt(map, prevPos, tiltSide);
+				int3 p = SwitchTilt(map, prevPos, tiltSide, tiltSide);
 				if (p.x >= 0) {
 					prevPos = p; placed++;
 					placedCoords.InsertLast(p); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface);
@@ -1291,14 +1314,14 @@ void Run()
 						} else if (droll == 5) {
 							if (state == SurfaceState::Slope) {
 								// c1) Slope → TiltRight
-								g_s2sForcedTiltSide = TiltSide::TiltRight;
+								s2sForcedTiltSide = TiltSide::TiltRight;
 								targetState = SurfaceState::Tilt;
 								targetBlock = tiltRightPool.Length > 0 ? PickFromPool(tiltRightPool) : PickFromPool(tiltPool);
 								TGprint("V4 S2S: option c1 — Slope→TiltRight");
 							} else {
 								// d1) Tilt → SlopeUp
-								g_s2sHasForcedSlope = true;
-								g_s2sForcedSlopeDir = SlopeDir::SlopeUp;
+								s2sHasForcedSlope = true;
+								s2sForcedSlopeDir = SlopeDir::SlopeUp;
 								targetState = SurfaceState::Slope;
 								targetBlock = slopeUpPool.Length > 0 ? PickFromPool(slopeUpPool) : PickFromPool(slopePool);
 								TGprint("V4 S2S: option d1 — Tilt→SlopeUp");
@@ -1306,14 +1329,14 @@ void Run()
 						} else if (droll == 6) {
 							if (state == SurfaceState::Slope) {
 								// c2) Slope → TiltLeft
-								g_s2sForcedTiltSide = TiltSide::TiltLeft;
+								s2sForcedTiltSide = TiltSide::TiltLeft;
 								targetState = SurfaceState::Tilt;
 								targetBlock = tiltLeftPool.Length > 0 ? PickFromPool(tiltLeftPool) : PickFromPool(tiltPool);
 								TGprint("V4 S2S: option c2 — Slope→TiltLeft");
 							} else {
 								// d2) Tilt → SlopeDown
-								g_s2sHasForcedSlope = true;
-								g_s2sForcedSlopeDir = SlopeDir::SlopeDown;
+								s2sHasForcedSlope = true;
+								s2sForcedSlopeDir = SlopeDir::SlopeDown;
 								targetState = SurfaceState::Slope;
 								targetBlock = slopeDownPool.Length > 0 ? PickFromPool(slopeDownPool) : PickFromPool(slopePool);
 								TGprint("V4 S2S: option d2 — Tilt→SlopeDown");
@@ -1346,6 +1369,38 @@ void Run()
 			if (state == SurfaceState::Tilt && stateRun >= MAX_TILT_RUN && targetState != SurfaceState::Flat) {
 				targetState = SurfaceState::Flat;
 				targetBlock = PickFromPool(flatPool);
+			}
+
+
+			// ── Stadium wall avoidance ────────────────────
+
+			if (st_stadiumMode) {
+				int distAhead = StadiumDistAhead(prevPos, g_travelDir);
+				if (distAhead < STADIUM_EXIT_DIST && state != SurfaceState::Flat) {
+					// Approaching wall in a slope/tilt: exit to flat before turning.
+					targetState = SurfaceState::Flat;
+					targetBlock = PickFromPool(flatPool);
+					TGprint("Stadium: wall in " + tostring(distAhead) + " blocks ("
+						+ (state == SurfaceState::Slope ? "Slope" : "Tilt") + ") → forcing Flat exit");
+				} else if (distAhead < STADIUM_TURN_DIST && state == SurfaceState::Flat) {
+					// About to hit a wall: force a Curve2 turn toward the side with more room.
+					string curveBlock = (distAhead < 2)
+						? SURF_PREFIX[int(g_surface)] + "Curve1"
+						: SURF_PREFIX[int(g_surface)] + "Curve2";
+					auto leftDir  = TurnDirLeft(g_travelDir);
+					auto rightDir = TurnDirRight(g_travelDir);
+					int leftDist  = StadiumDistAhead(prevPos, leftDir);
+					int rightDist = StadiumDistAhead(prevPos, rightDir);
+					if (leftDist > rightDist)
+						g_forceTurnDirIdx = DirToInt(leftDir);
+					else if (rightDist > leftDist)
+						g_forceTurnDirIdx = DirToInt(rightDir);
+					else
+						g_forceTurnDirIdx = (MathRand(0, 1) == 0) ? DirToInt(leftDir) : DirToInt(rightDir);
+					targetState = SurfaceState::Flat;
+					targetBlock = curveBlock;
+					TGprint("Stadium: wall in " + tostring(distAhead) + " blocks (Flat) → forcing " + curveBlock);
+				}
 			}
 
 			// ── Transition ────────────────────────────────────────────────
@@ -1416,9 +1471,9 @@ void Run()
 				if (s2s.Length > 0 && lastBName == s2s) {
 					// Derive tiltSide from slopeDir (SlopeUp→TiltLeft, SlopeDown→TiltRight),
 					// unless the S2S decision pre-set a specific side (options c1/c2).
-					if (g_s2sForcedTiltSide != TiltSide::TiltNone) {
-						tiltSide = g_s2sForcedTiltSide;
-						g_s2sForcedTiltSide = TiltSide::TiltNone;
+					if (s2sForcedTiltSide != TiltSide::TiltNone) {
+						tiltSide = s2sForcedTiltSide;
+						s2sForcedTiltSide = TiltSide::TiltNone;
 					} else {
 						tiltSide = (slopeDir == SlopeDir::SlopeUp) ? TiltSide::TiltLeft : TiltSide::TiltRight;
 					}
@@ -1451,9 +1506,9 @@ void Run()
 				if (s2s.Length > 0 && lastBName == s2s) {
 					// Derive slopeDir from travel direction (N=up, S=down),
 					// unless the S2S decision pre-set a specific direction (options d1/d2).
-					if (g_s2sHasForcedSlope) {
-						slopeDir = g_s2sForcedSlopeDir;
-						g_s2sHasForcedSlope = false;
+					if (s2sHasForcedSlope) {
+						slopeDir = s2sForcedSlopeDir;
+						s2sHasForcedSlope = false;
 					} else {
 						slopeDir = (g_travelDir == CGameEditorPluginMap::ECardinalDirections::North) ? SlopeDir::SlopeUp : SlopeDir::SlopeDown;
 					}
@@ -1563,10 +1618,12 @@ void Run()
 
 			// For curve blocks, pick left or right turn 50/50 by setting the forced exit dir.
 			// Tilt curves and other special blocks are excluded — only plain CurveN blocks.
+			// Skip if stadium wall avoidance already picked a direction.
 			if (state == SurfaceState::Flat
 				&& targetBlock.IndexOf("Curve") >= 0
 				&& targetBlock.IndexOf("Tilt") < 0
-				&& targetBlock.IndexOf("Slope") < 0) {
+				&& targetBlock.IndexOf("Slope") < 0
+				&& g_forceTurnDirIdx < 0) {
 				if (MathRand(0, 1) == 0)
 					g_forceTurnDirIdx = DirToInt(TurnDirLeft(g_travelDir));
 				else

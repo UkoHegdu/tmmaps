@@ -142,12 +142,12 @@ When the last placed body block is a `Slope2Straight` (Platform only), the norma
 | 5 | 1/7 | **c1 / d1** | Slope→TiltRight (c1) or Tilt→SlopeUp (d1) |
 | 6 | 1/7 | **c2 / d2** | Slope→TiltLeft (c2) or Tilt→SlopeDown (d2) |
 
-Options c and d use the Slope↔Tilt shortcut (no transition blocks). To force a specific side/direction the decision sets one of two global flags before the transition section runs:
+Options c and d use the Slope↔Tilt shortcut (no transition blocks). To force a specific side/direction the decision sets one of three loop-local variables (declared at the top of each iteration in `Run()`) before the transition section runs:
 
-- `g_s2sForcedTiltSide` — consumed by the Slope→Tilt shortcut; overrides the default `slopeDir`-derived mapping.
-- `g_s2sHasForcedSlope` / `g_s2sForcedSlopeDir` — consumed by the Tilt→Slope shortcut; overrides the default `g_travelDir`-derived mapping.
+- `s2sForcedTiltSide` — consumed by the Slope→Tilt shortcut; overrides the default `slopeDir`-derived mapping.
+- `s2sHasForcedSlope` / `s2sForcedSlopeDir` — consumed by the Tilt→Slope shortcut; overrides the default `g_travelDir`-derived mapping.
 
-Both flags are cleared at the top of each iteration so a stale value from a blocked transition (e.g. overridden by run limits) never carries over.
+Because they are loop-locals (re-initialised every iteration), a stale value from a blocked transition (e.g. overridden by run limits) can never carry over.
 
 ---
 

@@ -88,6 +88,17 @@ If loading fails, check the **OpenPlanet log** (F3 → Log) for the exact error.
    - In `ui.as`: search for the footer text and set the “Maintained by” / credit line to your name.
    - Optionally remove or change `siteid` in `info.toml` if you publish a new plugin entry on a site (e.g. OpenPlanet / TMX).
 
+## Notes for maintainers / known limitations
+
+- **Hardcoded dev paths.** The block-data loaders fall back to a literal absolute path
+  (`d:\REPO\tmmaps\block_data\`) when the Openplanet storage folder isn't found, and a few
+  dev-tooling functions write directly to that path with no fallback
+  (see `transitions::GetBlockDataPath`, `v4::GetBlockDataPath`, and the `GenerateFlatBlocks` /
+  `GenerateConnectivity*` / `DiagBlockConnectionCheck` functions in `main.as`).
+  This works on the original author's machine only. It is **not** a problem while the plugin
+  is used locally by one person, but it must be fixed (read/write under `IO::FromStorageFolder`,
+  or make the path a setting) before the plugin is shared or published.
+
 ## License and credits
 
 - Original Track Generator: **AvondaleZPR** (OpenPlanet / TMX site ID 156).

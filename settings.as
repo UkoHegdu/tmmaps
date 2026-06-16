@@ -102,3 +102,6 @@ int testBlockPosY = -1;
 
 [Setting category="General" name="Test block Z position (-1 to disable)"]
 int testBlockPosZ = -1;
+
+[Setting category="General" name="Stadium Mode"]
+bool st_stadiumMode = false;

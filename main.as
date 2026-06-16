@@ -3,571 +3,6 @@ void Begin()
 	v4::Run();
 }
 
-void BeginLegacy()
-{
-	uint64 before = Time::get_Now();
-
-	//preparing
-	auto app = cast<CTrackMania>(GetApp());
-	if (app is null) {
-		return;
-	}
-		
-	auto editor = cast<CGameCtnEditorFree>(app.Editor);
-	if (editor is null) {
-		UI::ShowNotification("editor is not opened!");
-		warn("editor is not opened!");
-		return;
-	}
-	
-	auto map = cast<CGameEditorPluginMap>(editor.PluginMapType);
-	if (map is null) {
-		return;
-	}
-	
-	map.RemoveAllBlocks();	
-	if(blocks::IsMultipleBlockTypesSelected())
-	{
-		RandomBlocks();
-	}
-	
-	seedDouble = ConvertSeed(seedText);
-	//--
-	
-	TGprint("\\$0f0\\$sGenerating new track!");
-	
-	//variables
-	auto dir = RandomDirection();
-	auto point = RandomPoint();
-	auto prevDir = dir;
-	auto prevPrevDir = dir;
-	auto prevPoint = point;
-	auto prevPrevPoint = point;
-	auto connectPoint = int3(0,0,0);
-	string blockType = blocks::CURR_BLOCKS;
-	string prevBlockType = blocks::CURR_BLOCKS;
-	bool wasBlockTypeSwitched = false;
-	int blocksPlacedAfterCP = 0;
-	//--
-	
-	//start block
-	PlaceBlock(map, blocks::RD_START, dir, point);
-	TGprint("Created START block, at " + tostring(point) + ", pointing " + tostring(dir));
-	map.SetBlockSkin(GetBlockAt(map, point), BANNER_LINK);
-	point = point.opAdd(MoveDir(dir));
-	//--
-	
-	int blockCantBePlacedCount = 0;
-	int effectiveMaxBlocks = blocks::extendedSlopes ? Math::Min(st_maxBlocks, 100) : st_maxBlocks;
-	array<int3>@ hist_placed = array<int3>();
-	array<int3>@ hist_nextPoint = array<int3>();
-	array<int>@ hist_nextDir = array<int>();
-	array<string>@ hist_block = array<string>();
-
-	for	(int blockIndex = 1; blockIndex <= effectiveMaxBlocks; blockIndex++)
-	{
-		if(blockCantBePlacedCount >= 50)
-		{
-			TGprint("\\$f00cant continue the track atfter " + tostring(blockIndex) + " blocks placed :(");
-			break;
-		}
-		
-		if(blocks::randomcolors)
-		{
-			map.NextMapElemColor = RandomColor();
-		}
-		
-		blockType = blocks::CURR_BLOCKS;
-		bool wasBlockTypeSwitchedLocal = false;
-	
-		string block = RandomBlock();
-		auto dirCopy = dir;
-		auto pointCopy = point;
-		int turn = MathRand(1,3);
-		bool blockPlaced = false;
-		bool techConnect = false;
-		
-		if(st_useCpBlocks)
-		{
-			blocksPlacedAfterCP++;
-			if(blocksPlacedAfterCP >= st_cpBlocks)
-			{
-				block = blocks::RD_CP;
-			}
-		}
-		
-		//special block check before
-		if((block == blocks::RD_STRAIGHT && point.y == 9 && MathRand(1,8) == 4))
-		{
-			block = blocks::RD_END;
-			dir = TurnDirLeft(dir);
-			dir = TurnDirLeft(dir);
-		}
-		else if(block == blocks::RD_TURN1 || block == blocks::RD_TURN2 || block == blocks::RD_TURN3 || block == blocks::RD_TURN4)
-		{
-			if(block == blocks::RD_TURN2)
-			{
-				if (turn == 1)
-				{
-					TGprint("Turn Right");
-					dir = TurnDirRight(dir);
-					if(dir == DIR_EAST)
-					{
-						point = point.opAdd(MoveDir(dir));
-					}
-					else if(dir == DIR_WEST)
-					{
-						point = point.opAdd(MoveDir(TurnDirLeft(dir)));
-					}
-					else if(dir == DIR_SOUTH)
-					{
-						point = point.opAdd(MoveDir(dir)).opAdd(MoveDir(TurnDirLeft(dir)));
-					}
-				}
-				else
-				{
-					TGprint("Turn Left");
-					dir = TurnDirLeft(dir);
-					dir = TurnDirLeft(dir);
-					if(dir == DIR_EAST)
-					{
-						point = point.opAdd(MoveDir(TurnDirRight(dir)));
-					}
-					else if(dir == DIR_WEST)
-					{
-						point = point.opAdd(MoveDir(TurnDirRight(TurnDirRight(dir))));
-					}
-					else if(dir == DIR_NORTH)
-					{
-						point = point.opAdd(MoveDir(TurnDirRight(dir))).opAdd(MoveDir(TurnDirRight(TurnDirRight(dir))));
-					}
-				}
-			}
-			else
-			{
-				switch(turn)
-				{	
-					case 1:
-						TGprint("Turn Right");
-						dir = TurnDirRight(dir);
-						break;
-					case 2: 
-						TGprint("Turn Left");
-						dir = TurnDirLeft(dir);
-						dir = TurnDirLeft(dir);
-				}
-			}
-		}
-		else if(block == blocks::RD_UP1 || block == blocks::RD_UP2)
-		{
-			if(point.y >= MAX_Y)
-			{
-				TGprint("WAYTOOHIGH");
-				block = blocks::RD_STRAIGHT;
-			}
-			else if(turn == 2 && point.y >= 12)
-			{
-				dir = TurnDirLeft(dir);
-				dir = TurnDirLeft(dir);
-				if(block == blocks::RD_UP1)
-				{
-					point = point.opAdd(int3(0,-1,0));
-				}
-				else
-				{
-					point = point.opAdd(int3(0,-2,0));
-				}
-			}
-		}
-		else if(block == blocks::RD_CONNECT)
-		{
-			if(blocks::CURR_BLOCKS == "TechBlocks" || blocks::CURR_BLOCKS == "WaterBlocks") 
-			{
-				techConnect = true;
-				block = blocks::RD_STRAIGHT;
-			}
-			if(CanPlaceBlock(map, block, dir, point.opAdd(MoveDir(dir))) && CanPlaceBlock(map, block, dir, point.opAdd(MoveDir(dir)).opAdd(MoveDir(dir))))
-			{
-				TGprint("Switch Block Type");
-				if(blocks::CURR_BLOCKS != "OpenTechRoadBlocks" && blocks::CURR_BLOCKS != "OpenDirtRoadBlocks" && blocks::CURR_BLOCKS != "OpenIceRoadBlocks" && blocks::CURR_BLOCKS != "OpenGrassRoadBlocks" && blocks::CURR_BLOCKS != "PlatformTechBlocks" && blocks::CURR_BLOCKS != "PlatformDirtBlocks" && blocks::CURR_BLOCKS != "PlatformIceBlocks" && blocks::CURR_BLOCKS != "PlatformGrassBlocks" && blocks::CURR_BLOCKS != "PlasticBlocks")
-				{
-					dir = TurnDirLeft(dir);
-					dir = TurnDirLeft(dir);
-				}
-				wasBlockTypeSwitchedLocal = true;
-			}
-			else 
-			{
-				techConnect = false;
-				block = blocks::RD_STRAIGHT;
-			}
-		}
-		else if(block == blocks::RD_BOOSTER1 || block == blocks::RD_BOOSTER2)
-		{
-			if (turn > 1)
-			{
-				dir = TurnDirLeft(dir);
-				dir = TurnDirLeft(dir);
-			}
-		}
-		//--
-		
-		// Transition logic: if prev block is non-flat and we're placing different category, use transition block
-		string prevBlockName = "";
-		auto prevBlock = map.GetBlock(prevPoint);
-		if (prevBlock !is null) prevBlockName = tostring(prevBlock.BlockModel.IdName);
-		if (prevBlockName.Length > 0)
-		{
-			string fromCat = transitions::GetCategoryFromBlockName(prevBlockName);
-			string toCat = transitions::GetCategoryFromBlockName(block);
-			if (transitions::NeedsTransitionViaFlat(fromCat, toCat))
-			{
-				array<string>@ candidates = transitions::GetTransitionBlockCandidates(prevBlockName, block);
-				if (candidates.Length > 0)
-					block = blocks::PickFromPool(candidates, block);
-			}
-		}
-		
-		//placing block
-		if(CanPlaceBlock(map, block, dir, point))
-		{
-			PlaceBlock(map, block, dir, point);
-			blockPlaced = true;
-		}
-		//--	
-
-		if(blockPlaced)
-		{
-			//special block check after
-			if(block == blocks::RD_END)
-			{
-				dir = dirCopy;
-				point = point.opAdd(MoveDir(dir));
-				if(MathRand(1,3) == 2)
-				{
-					if (CanPlaceBlock(map, block, dir, point.opAdd(MoveDir(dir))))
-					{
-						point = point.opAdd(MoveDir(dir));
-					}
-				}
-				PlaceBlock(map, block, dir, point);
-			}
-			else if(block == blocks::RD_TURN1)
-			{
-				if(turn == 2)
-				{
-					dir = dirCopy;
-					dir = TurnDirLeft(dir);
-				}
-			}
-			else if(block == blocks::RD_TURN2)
-			{
-				if (turn == 1)
-				{
-					point = pointCopy.opAdd(MoveDir(dirCopy));
-					dir = TurnDirRight(dirCopy);
-					point = point.opAdd(MoveDir(dir));
-				}
-				else
-				{
-					point = pointCopy.opAdd(MoveDir(dirCopy));
-					dir = TurnDirLeft(dirCopy);
-					point = point.opAdd(MoveDir(dir));
-				}
-			}
-			else if(block == blocks::RD_UP1 || block == blocks::RD_UP2)
-			{
-				if(turn == 2 && point.y >= 12)
-				{
-					dir = dirCopy;
-				}
-				else
-				{
-					if(block == blocks::RD_UP1)
-					{
-						point = point.opAdd(int3(0,1,0));
-					}
-					else
-					{
-						point = point.opAdd(int3(0,2,0));
-					}
-				}
-			}
-			else if(block == blocks::RD_CONNECT || techConnect)
-			{
-				dir = dirCopy;
-				RandomBlocks();				
-				
-				point = point.opAdd(MoveDir(dir));
-				
-				if(blocks::CURR_BLOCKS == "OpenTechRoadBlocks" || blocks::CURR_BLOCKS == "OpenDirtRoadBlocks" || blocks::CURR_BLOCKS == "OpenIceRoadBlocks" || blocks::CURR_BLOCKS == "OpenGrassRoadBlocks" || blocks::CURR_BLOCKS == "PlatformTechBlocks" || blocks::CURR_BLOCKS == "PlatformDirtBlocks" || blocks::CURR_BLOCKS == "PlatformIceBlocks" || blocks::CURR_BLOCKS == "PlatformGrassBlocks" || blocks::CURR_BLOCKS == "PlasticBlocks")
-				{
-					dir = TurnDirLeft(dir);
-					dir = TurnDirLeft(dir);					
-				}
-				
-				if (blocks::CURR_BLOCKS != "TechBlocks" && blocks::CURR_BLOCKS != "WaterBlocks")
-				{	
-					PlaceBlock(map, blocks::RD_CONNECT, dir, point);
-				}
-				else
-				{
-					PlaceBlock(map, blocks::RD_STRAIGHT, dir, point);
-				}
-				connectPoint = point;
-				TGprint("placed connect point at " + tostring(connectPoint));
-				
-				if(blocks::CURR_BLOCKS == "OpenTechRoadBlocks" || blocks::CURR_BLOCKS == "OpenDirtRoadBlocks" || blocks::CURR_BLOCKS == "OpenIceRoadBlocks" || blocks::CURR_BLOCKS == "OpenGrassRoadBlocks" || blocks::CURR_BLOCKS == "PlatformTechBlocks" || blocks::CURR_BLOCKS == "PlatformDirtBlocks" || blocks::CURR_BLOCKS == "PlatformIceBlocks" || blocks::CURR_BLOCKS == "PlatformGrassBlocks" || blocks::CURR_BLOCKS == "PlasticBlocks")
-				{
-					dir = dirCopy;
-				}
-			}
-			else if(block == blocks::RD_CP)
-			{
-				auto checkpoint = map.GetBlock(point);
-				map.SetBlockSkin(checkpoint, BANNER_LINK);
-			}
-			else if(block == blocks::RD_BOOSTER1 || block == blocks::RD_BOOSTER2)
-			{
-				dir = dirCopy;
-			}
-			//--
-			
-			//set point to the next block
-			point = point.opAdd(MoveDir(dir));
-			//--
-		}	
-		
-		//check for the next 2 blocks
-		if (!blockPlaced || !CanPlaceBlock(map, blocks::RD_STRAIGHT, dir, point) || !CanPlaceBlock(map, blocks::RD_STRAIGHT, dir, point.opAdd(MoveDir(dir))))
-		{
-			// Try escape: place platform one level below, left or right (no walls so road can continue below)
-			bool escaped = false;
-			int3 posBelowLeft = point.opAdd(int3(0, -1, 0)).opAdd(MoveDir(TurnDirLeft(dir)));
-			int3 posBelowRight = point.opAdd(int3(0, -1, 0)).opAdd(MoveDir(TurnDirRight(dir)));
-			if (CanPlaceBlock(map, blocks::PLATFORM_DROP, dir, posBelowLeft) && CanPlaceBlock(map, blocks::RD_STRAIGHT, dir, posBelowLeft.opAdd(MoveDir(dir))) && CanPlaceBlock(map, blocks::RD_STRAIGHT, dir, posBelowLeft.opAdd(MoveDir(dir)).opAdd(MoveDir(dir))))
-			{
-				PlaceBlock(map, blocks::PLATFORM_DROP, dir, posBelowLeft);
-				point = posBelowLeft.opAdd(MoveDir(dir));
-				prevPrevPoint = prevPoint;  // block before the platform
-				prevPoint = posBelowLeft;
-				escaped = true;
-				TGprint("Dead end escape: platform below-left at " + tostring(posBelowLeft));
-			}
-			else if (CanPlaceBlock(map, blocks::PLATFORM_DROP, dir, posBelowRight) && CanPlaceBlock(map, blocks::RD_STRAIGHT, dir, posBelowRight.opAdd(MoveDir(dir))) && CanPlaceBlock(map, blocks::RD_STRAIGHT, dir, posBelowRight.opAdd(MoveDir(dir)).opAdd(MoveDir(dir))))
-			{
-				PlaceBlock(map, blocks::PLATFORM_DROP, dir, posBelowRight);
-				point = posBelowRight.opAdd(MoveDir(dir));
-				prevPrevPoint = prevPoint;  // block before the platform
-				prevPoint = posBelowRight;
-				escaped = true;
-				TGprint("Dead end escape: platform below-right at " + tostring(posBelowRight));
-			}
-			if (escaped)
-			{
-				prevDir = dir;
-				if (blocks::extendedSlopes) {
-					hist_placed.InsertLast(prevPoint);
-					hist_nextPoint.InsertLast(point);
-					hist_nextDir.InsertLast(DirToInt(dir));
-					hist_block.InsertLast(blocks::PLATFORM_DROP);
-					if (hist_placed.Length > 20) {
-						hist_placed.RemoveAt(0);
-						hist_nextPoint.RemoveAt(0);
-						hist_nextDir.RemoveAt(0);
-						hist_block.RemoveAt(0);
-					}
-				}
-				blockCantBePlacedCount = 0;
-				continue;
-			}
-
-			TGprint(block + " block cannot be placed at " + tostring(point) +", canceling previous one");
-			map.RemoveBlock(prevPoint);
-
-			int rollbackCount = 1;
-			if (blocks::extendedSlopes && hist_placed.Length > 0 && IsSlopeBlock(hist_block[hist_placed.Length - 1]))
-			{
-				// count consecutive slope blocks at end of history (including the one we just removed)
-				uint L = 1;
-				while (L < hist_placed.Length && IsSlopeBlock(hist_block[hist_placed.Length - 1 - int(L)]))
-					L++;
-				L = Math::Min(L, blockIndex);
-				if (L > 1)
-				{
-					TGprint("Rolling back slope segment: " + tostring(L) + " blocks");
-					uint restoreIdx = hist_placed.Length - L;
-					int3 restoreNextPoint = hist_nextPoint[restoreIdx];
-					int restoreNextDir = hist_nextDir[restoreIdx];
-					int3 restorePrevPoint = hist_placed[restoreIdx];
-					// remove L-1 more blocks from map (we already removed the last one at prevPoint)
-					for (uint k = 1; k < L; k++)
-					{
-						int3 removeAt = hist_placed[hist_placed.Length - 1 - int(k)];
-						while (!map.IsEditorReadyForRequest) { yield(); }
-						map.RemoveBlock(removeAt);
-					}
-					// check if we rolled back over a connect block
-					for (uint k = 0; k < L && k < hist_block.Length; k++)
-					{
-						if (hist_block[hist_block.Length - 1 - int(k)] == blocks::RD_CONNECT)
-						{
-							while (!map.IsEditorReadyForRequest) { yield(); }
-							map.RemoveBlock(connectPoint);
-							wasBlockTypeSwitched = false;
-							blocks::SetBlockType(prevBlockType);
-							break;
-						}
-					}
-					hist_placed.RemoveRange(restoreIdx, L);
-					hist_nextPoint.RemoveRange(restoreIdx, L);
-					hist_nextDir.RemoveRange(restoreIdx, L);
-					hist_block.RemoveRange(restoreIdx, L);
-					point = restoreNextPoint;
-					dir = IntToDir(restoreNextDir);
-					prevPoint = restorePrevPoint;
-					prevDir = dir;
-					prevPrevPoint = (restoreIdx > 0) ? hist_placed[restoreIdx - 1] : prevPoint;
-					prevPrevDir = (restoreIdx > 0) ? IntToDir(hist_nextDir[restoreIdx - 1]) : prevDir;
-					rollbackCount = int(L);
-				}
-			}
-
-			if (rollbackCount == 1)
-			{
-				if(st_useCpBlocks && block == blocks::RD_CP)
-				{
-					blocksPlacedAfterCP = blocksPlacedAfterCP-2;
-				}
-				if(wasBlockTypeSwitched)
-				{
-					TGprint("removing connect point from " + tostring(connectPoint));
-					map.RemoveBlock(connectPoint);
-					prevDir = prevPrevDir;
-					prevPoint = prevPrevPoint;
-					wasBlockTypeSwitchedLocal = false;
-				}
-				blocks::SetBlockType(prevBlockType);
-				point = prevPoint;
-				dir = prevDir;
-			}
-			
-			blockIndex -= rollbackCount;
-			blockCantBePlacedCount++;
-			continue;
-		}
-		//--
-		
-		if(st_useCpBlocks && block == blocks::RD_CP)
-		{
-			blocksPlacedAfterCP = 0;
-		}
-		
-		wasBlockTypeSwitched = wasBlockTypeSwitchedLocal;
-		
-		// placement history for extended-slopes multi-block rollback
-		if (blocks::extendedSlopes) {
-			hist_placed.InsertLast(prevPoint);
-			hist_nextPoint.InsertLast(point);
-			hist_nextDir.InsertLast(DirToInt(dir));
-			hist_block.InsertLast(block);
-			if (hist_placed.Length > 20) {
-				hist_placed.RemoveAt(0);
-				hist_nextPoint.RemoveAt(0);
-				hist_nextDir.RemoveAt(0);
-				hist_block.RemoveAt(0);
-			}
-		}
-		
-		TGprint("Placed " + block + " block, at " + tostring(prevPoint));
-		prevDir = dir;
-		prevPrevDir = dir;
-		prevPrevPoint = prevPoint;
-		prevPoint = point;
-		prevBlockType = blockType;
-		blockCantBePlacedCount = 0;
-	}
-	
-	//finish block
-	bool finishPlaced = true;
-	if (!PlaceBlock(map, blocks::RD_FINISH, dir, point))
-	{	
-		finishPlaced = false;
-		for(int blockTypeIndex = 1; blockTypeIndex <= 4; blockTypeIndex++)
-		{
-			blocks::SetBlockType(blockTypeIndex);
-			if (PlaceBlock(map, blocks::RD_FINISH, dir, point))
-			{
-				finishPlaced = true;
-				break;
-			}
-		}
-	}	
-	if(!finishPlaced) 
-	{ 
-		warn("cant place finish");
-		return; 
-	}
-	map.SetBlockSkin(GetBlockAt(map, point), BANNER_LINK);
-	TGprint("Created FINISH block at " + tostring(point));
-	//--
-	
-	print("\\$0f0\\$sTrack generated in "+ tostring(Time::get_Now() - before) + " milliseconds!");
-}
-
-void Preload()
-{
-	uint64 before = Time::get_Now();
-	auto app = cast<CTrackMania>(GetApp());
-	if (app is null) {
-		return;
-	}
-		
-	auto editor = cast<CGameCtnEditorFree>(app.Editor);
-	if (editor is null) {
-		UI::ShowNotification("editor is not opened!");
-		warn("editor is not opened!");
-		return;
-	}
-	
-	auto map = cast<CGameEditorPluginMap>(editor.PluginMapType);
-	if (map is null) {
-		return;
-	}
-	
-	map.PreloadAllBlocks();
-	preloaded = true;
-	
-	print("\\$080\\$sAll block preloaded in "+ tostring(Time::get_Now() - before) + " milliseconds!");
-}
-
-void Undo()
-{
-	auto app = cast<CTrackMania>(GetApp());
-	if (app is null) {
-		return;
-	}
-		
-	auto editor = cast<CGameCtnEditorFree>(app.Editor);
-	if (editor is null) {
-		UI::ShowNotification("editor is not opened!");
-		warn("editor is not opened!");
-		return;
-	}
-	
-	auto map = cast<CGameEditorPluginMap>(editor.PluginMapType);
-	if (map is null) {
-		return;
-	}
-	
-	map.RemoveAllBlocks();
-}
-
-bool IsSlopeBlock(const string &in blockName)
-{
-	return (blockName == blocks::RD_UP1 || blockName == blocks::RD_UP2);
-}
-
 // Classify block by IdName prefix (Nadeo naming). Returns "Scenery", "Track", or "Other".
 string BlockKindFromIdName(const string &in idName)
 {
@@ -1558,4 +993,127 @@ void FindSuitableBlocksAfterPlacedChain()
 	}
 	TGprint("\\$0f0\\$s=== End results ===");
 	UI::ShowNotification("Found " + tostring(suitableBlocks.Length) + " suitable blocks (see log)");
+}
+
+// Diag block connection audit: for each RoadTech diagonal block, places it, counts all Track
+// blocks that can connect after it, checks if RoadTechStraight is among them, and writes
+// results to block_data/diag_connections.txt.
+void DiagBlockConnectionCheck()
+{
+	auto app = cast<CTrackMania>(GetApp());
+	if (app is null) { UI::ShowNotification("App not available!"); return; }
+
+	auto editor = cast<CGameCtnEditorFree>(app.Editor);
+	if (editor is null) { UI::ShowNotification("Editor is not opened!"); return; }
+
+	auto map = cast<CGameEditorPluginMap>(editor.PluginMapType);
+	if (map is null) { UI::ShowNotification("Map not available!"); return; }
+
+	const array<string> DIAG_BLOCKS = {
+		"RoadTechDiagLeftStartStraightX2",
+		"RoadTechDiagLeftStartCurve1In",
+		"RoadTechDiagLeftStartCurve2In",
+		"RoadTechDiagLeftStartCurve1Out",
+		"RoadTechDiagLeftStartCurve2Out",
+		"RoadTechDiagRightStartStraightX2",
+		"RoadTechDiagRightStartCurve1In",
+		"RoadTechDiagRightStartCurve2In",
+		"RoadTechDiagRightStartCurve1Out",
+		"RoadTechDiagRightStartCurve2Out",
+		"RoadTechBranchToDiagLeft",
+		"RoadTechBranchToDiagRight"
+	};
+
+	TGprint("\\$0f0\\$s=== Diag Block Connection Check ===");
+
+	LoadMapSize();
+	map.RemoveAllBlocks();
+	while (!map.IsEditorReadyForRequest) { yield(); }
+
+	int3 testPos = int3(MAX_X / 2, int(Math::Floor(MAX_Y / 4)), MAX_Z / 2);
+	TGprint("Test position: " + tostring(testPos));
+
+	string outputFile = "d:\\REPO\\tmmaps\\block_data\\diag_connections.txt";
+	IO::File outFile(outputFile, IO::FileMode::Write);
+	outFile.Write("# RoadTech Diag Block Connection Audit\n");
+	outFile.Write("# Format: BlockName | totalConnections | straightCompatible | connectedBlocks...\n\n");
+
+	for (uint di = 0; di < DIAG_BLOCKS.Length; di++) {
+		string diagBlock = DIAG_BLOCKS[di];
+
+		// Verify the block exists in this map
+		auto info = map.GetBlockModelFromName(diagBlock);
+		if (info is null) {
+			TGprint("\\$ff0" + diagBlock + " — not found in map, skipping");
+			outFile.Write(diagBlock + " | NOT_FOUND\n");
+			continue;
+		}
+
+		// Clear slot if occupied
+		if (map.GetBlock(testPos) !is null) {
+			map.RemoveBlock(testPos);
+			while (!map.IsEditorReadyForRequest) { yield(); }
+		}
+
+		// Place the diag block
+		if (!PlaceBlock(map, diagBlock, DIR_NORTH, testPos)) {
+			TGprint("\\$ff0" + diagBlock + " — failed to place, skipping");
+			outFile.Write(diagBlock + " | PLACE_FAILED\n");
+			continue;
+		}
+
+		// Count all Track blocks that can connect after this one
+		array<string> connected;
+		bool straightCompat = false;
+		for (uint j = 0; j < map.BlockModels.Length; j++) {
+			auto model = map.BlockModels[j];
+			if (model is null) continue;
+			string candidateName = tostring(model.IdName);
+			if (BlockKindFromIdName(candidateName) != "Track") continue;
+			auto result = ConnectBlocks(map, testPos, candidateName);
+			if (result !is null) {
+				connected.InsertLast(candidateName);
+				if (candidateName == "RoadTechStraight") straightCompat = true;
+			}
+		}
+
+		// Log connection points for RoadTechStraight
+		auto diagBlockRef = map.GetBlock(testPos);
+		auto straightInfo = map.GetBlockModelFromName("RoadTechStraight");
+		if (diagBlockRef !is null && straightInfo !is null) {
+			while (!map.IsEditorReadyForRequest) { yield(); }
+			map.GetConnectResults(diagBlockRef, straightInfo);
+			while (!map.IsEditorReadyForRequest) { yield(); }
+		}
+
+		// Log to console
+		string compatStr = straightCompat ? "\\$0f0YES" : "\\$f00NO";
+		TGprint(diagBlock + " | connections: " + tostring(connected.Length) + " | RoadTechStraight: " + compatStr);
+		for (uint r = 0; r < map.ConnectResults.Length; r++) {
+			auto res = map.ConnectResults[r];
+			if (res is null) continue;
+			auto dir = v4::ConvertDir(res.Dir);
+			TGprint("  [" + tostring(r) + "] dir=" + v4::DirStr(dir)
+				+ "  coord=" + tostring(res.Coord)
+				+ "  CanPlace=" + (res.CanPlace ? "YES" : "NO"));
+		}
+
+		// Write to file
+		string line = diagBlock + " | " + tostring(connected.Length) + " | " + (straightCompat ? "YES" : "NO") + " |";
+		for (uint k = 0; k < connected.Length; k++) {
+			line += " " + connected[k];
+			if (k < connected.Length - 1) line += ",";
+		}
+		outFile.Write(line + "\n");
+
+		// Remove test block before next iteration
+		map.RemoveBlock(testPos);
+		while (!map.IsEditorReadyForRequest) { yield(); }
+	}
+
+	outFile.Write("\n# Done.\n");
+	outFile.Close();
+
+	TGprint("\\$0f0\\$s=== Diag Check Complete — saved to block_data/diag_connections.txt ===");
+	UI::ShowNotification("Diag check done! Results in block_data/diag_connections.txt");
 }

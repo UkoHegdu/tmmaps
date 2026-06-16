@@ -142,6 +142,9 @@ void RenderTrackGenerator()
 	st_maxBlocks = UI::SliderInt("\\$bbbblocks (excluding start and finish)", st_maxBlocks, 5, 100);
 
 	UI::Separator();
+	st_stadiumMode = UI::Checkbox("Stadium Mode \\$bbb(48×48 arena — avoids walls, no Curve5)", st_stadiumMode);
+
+	UI::Separator();
 	UI::Markdown("**Surface Mix** *(transitions inserted automatically)*");
 	UI::TextDisabled("Start block is placed automatically based on surface selection. If none selected, defaults to PlatformTech.");
 	st_v4Tech = UI::Checkbox("Road Tech", st_v4Tech);
@@ -281,6 +284,12 @@ void RenderDev()
 	UI::SameLine();
 	UI::TextDisabled("Writes all loaded block IdNames + kind to the OpenPlanet log.");
 	UI::Separator();
+	if (UI::Button(Icons::Search + " Diag block connection check")) {
+		startnew(DiagBlockConnectionCheck);
+	}
+	UI::SameLine();
+	UI::TextDisabled("Places each RoadTech Diag block, counts connections, checks RoadTechStraight compat. Writes to block_data/diag_connections.txt");
+	UI::Separator();
 	UI::TextDisabled("Requires editor open. Reads from and writes to: d:\\REPO\\tmmaps\\block_data\\");
 	UI::TextDisabled("Phase 2 clears the map then places blocks one by one.");
 	UI::TextDisabled("Progress every 500 blocks. Output: connectivity_<vista>.txt (overwrites)");
@@ -318,66 +327,6 @@ void RenderSettings()
 		UI::EndCombo();
 	}
 	UI::TextDisabled("Match the map's environment so only valid blocks are used.");
-	UI::Separator();
-
-	UI::Markdown("**Block Style / Type**");
-	UI::Text("\\$bbbSelect which block types to use. Multiple types can be selected for variety.");
-	UI::Text("\\$ff0\\$s" + Icons::ExclamationCircle + " Block types are categorized by surface/material (Tech, Dirt, Ice, Snow, Rally, etc.).");
-	UI::Separator();
-
-	UI::Markdown("**Road Types**");
-	blocks::roadblocks = UI::Checkbox("Tech Road", blocks::roadblocks);
-	if (blocks::roadblocks) {blocks::TechBlocks();}
-	UI::SameLine();
-	blocks::dirtblocks = UI::Checkbox("Dirt Road", blocks::dirtblocks);
-	if (blocks::dirtblocks) {blocks::DirtBlocks();}
-	UI::SameLine();
-	blocks::iceblocks = UI::Checkbox("Ice Road", blocks::iceblocks) && HAS_ADVANCED_EDITOR;
-	if (blocks::iceblocks) {blocks::IceBlocks();}
-	UI::SameLine();
-	blocks::icewallblocks = UI::Checkbox("Ice Road With Wall", blocks::icewallblocks);
-	if (blocks::icewallblocks) {blocks::IceWallBlocks();}
-	UI::SameLine();
-	blocks::sausageblocks = UI::Checkbox("Sausage Road (Bump)", blocks::sausageblocks);
-	if (blocks::sausageblocks) {blocks::SausageBlocks();}
-	blocks::waterblocks = UI::Checkbox("Water Road", blocks::waterblocks) && HAS_ADVANCED_EDITOR;
-	if (blocks::waterblocks) {blocks::WaterBlocks();}
-
-	UI::Separator();
-	UI::Markdown("**Platform Types**");
-	blocks::platformtechblocks = UI::Checkbox("Tech Platform", blocks::platformtechblocks) && HAS_ADVANCED_EDITOR;
-	if (blocks::platformtechblocks) {blocks::PlatformTechBlocks();}
-	UI::SameLine();
-	blocks::platformdirtblocks = UI::Checkbox("Dirt Platform", blocks::platformdirtblocks) && HAS_ADVANCED_EDITOR;
-	if (blocks::platformdirtblocks) {blocks::PlatformDirtBlocks();}
-	UI::SameLine();
-	blocks::platformiceblocks = UI::Checkbox("Ice Platform", blocks::platformiceblocks) && HAS_ADVANCED_EDITOR;
-	if (blocks::platformiceblocks) {blocks::PlatformIceBlocks();}
-	UI::SameLine();
-	blocks::platformgrassblocks = UI::Checkbox("Grass Platform", blocks::platformgrassblocks) && HAS_ADVANCED_EDITOR;
-	if (blocks::platformgrassblocks) {blocks::PlatformGrassBlocks();}
-	UI::SameLine();
-	blocks::plasticblocks = UI::Checkbox("Plastic Platform", blocks::plasticblocks) && HAS_ADVANCED_EDITOR;
-	if (blocks::plasticblocks) {blocks::PlasticBlocks();}
-
-	UI::Separator();
-	UI::Markdown("**Open Road Types**");
-	blocks::opentechroadblocks = UI::Checkbox("Open Tech Road", blocks::opentechroadblocks) && HAS_ADVANCED_EDITOR;
-	if (blocks::opentechroadblocks) {blocks::OpenTechRoadBlocks();}
-	UI::SameLine();
-	blocks::opendirtroadblocks = UI::Checkbox("Open Dirt Road", blocks::opendirtroadblocks) && HAS_ADVANCED_EDITOR;
-	if (blocks::opendirtroadblocks) {blocks::OpenDirtRoadBlocks();}
-	UI::SameLine();
-	blocks::openiceroadblocks = UI::Checkbox("Open Ice Road", blocks::openiceroadblocks) && HAS_ADVANCED_EDITOR;
-	if (blocks::openiceroadblocks) {blocks::OpenIceRoadBlocks();}
-	UI::SameLine();
-	blocks::opengrassroadblocks = UI::Checkbox("Open Grass Road", blocks::opengrassroadblocks) && HAS_ADVANCED_EDITOR;
-	if (blocks::opengrassroadblocks) {blocks::OpenGrassRoadBlocks();}
-
-	UI::Separator();
-	if(blocks::IsMultipleBlockTypesSelected()) {
-		UI::Text("\\$ff0\\$s" + Icons::ExclamationTriangle +" Using multiple styles will sometimes cause the generator to get stuck.");
-	}
 }
 
 void RenderSceneryGenerator()
@@ -389,10 +338,6 @@ void RenderSceneryGenerator()
 	if (UI::Button(Icons::Trash + " Undo Last Scenery")) {
 		CancelScenery();
 	}
-	UI::Separator();
-
-	blocks::randomcolors = UI::Checkbox("Paint blocks with random colors \\$bbb", blocks::randomcolors);
-
 	UI::Separator();
 	UI::Text("\\$999\\$sRandom Track Generator V4 " + Icons::Copyright);
 }
@@ -411,8 +356,6 @@ void Main()
 	}
 	seedText = playerInfo.Name;
 	seedText = seedText.ToUpper();
-
-	blocks::TechBlocks();
 
 	MainThinker();
 }
