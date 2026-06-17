@@ -374,6 +374,10 @@ void LoadPools()
 				if (!st_v4Special && line.IndexOf("Special") >= 0) continue;
 				if (!st_v4Ramps   && line.IndexOf("Ramp")    >= 0) continue;
 				if (st_stadiumMode && line.IndexOf("Curve5")  >= 0) continue;
+				// Platform blocks: only Curve1 and Curve2 — larger curves make turns too tight
+				bool isPlatform = xi >= 3;
+				if (isPlatform && xsec == "FLAT" &&
+				    (line.IndexOf("Curve3") >= 0 || line.IndexOf("Curve4") >= 0 || line.IndexOf("Curve5") >= 0)) continue;
 				if (xsec == "FLAT") {
 					flatPool.InsertLast(line);
 				} else if (xsec == "SLOPE" && xSlope[xi]) {
@@ -1074,77 +1078,83 @@ void LogPlacementDiag(CGameEditorPluginMap@ map, int3 prevPos, const string &in 
 		+ (details.Length > 0 ? "  [" + details + " ]" : "  [no candidates]"));
 }
 
+// ── Removal helpers ─────────────────────────────────────────────────────────────
+
+// Robustly remove the block anchored at `coord`, returning true only when the block
+// is verifiably gone (verified via GetBlockAt, a linear scan over RootMap.Blocks that
+// finds blocks by anchor even when the engine's GetBlock spatial lookup returns null).
+//
+// Strategy mirrors the proven full-clear logic:
+//   1. Fast path — engine GetBlock at the exact coord, remove by reported anchor.
+//   2. Direct RemoveBlock at coord — succeeds for some large blocks even when
+//      GetBlock at the same coord returns null (Curve4, tilt/curve bodies, etc.).
+//   3. ±6 cell scan for a queryable neighbour cell of the same block.
+//
+// `protect` lists anchors of OTHER blocks that must NOT be removed during the scan
+// (pass the currently-placed coords). The block whose anchor equals `coord` is always
+// eligible regardless of whether it also appears in `protect`.
+//
+// IMPORTANT: callers that pop a tracked block MUST route through this (not a bare
+// map.RemoveBlock), otherwise large/curve/tilt blocks silently survive removal and,
+// once dropped from the tracking array, become orphans the final clear never touches.
+bool RemoveBlockRobust(CGameEditorPluginMap@ map, int3 coord, const array<int3>@ protect = null)
+{
+	while (!map.IsEditorReadyForRequest) { yield(); }
+
+	// Step 1: engine spatial lookup at the exact coord.
+	auto b = map.GetBlock(coord);
+	if (b !is null) {
+		map.RemoveBlock(int3(b.CoordX, b.CoordY, b.CoordZ));
+		while (!map.IsEditorReadyForRequest) { yield(); }
+		if (GetBlockAt(map, coord) is null) return true;
+	} else {
+		// Step 2: direct remove at coord (works for some large blocks).
+		map.RemoveBlock(coord);
+		while (!map.IsEditorReadyForRequest) { yield(); }
+		if (GetBlockAt(map, coord) is null) return true;
+	}
+
+	// Step 3: ±6 scan for a queryable neighbour cell of the same block.
+	for (int xOff = -6; xOff <= 6; xOff++) {
+		for (int zOff = -6; zOff <= 6; zOff++) {
+			if (xOff == 0 && zOff == 0) continue;
+			for (int yOff = -1; yOff <= 1; yOff++) {
+				int3 scanCoord = int3(coord.x + xOff, coord.y + yOff, coord.z + zOff);
+				while (!map.IsEditorReadyForRequest) { yield(); }
+				auto b2 = map.GetBlock(scanCoord);
+				if (b2 is null) continue;
+				int3 b2Anchor = int3(b2.CoordX, b2.CoordY, b2.CoordZ);
+				bool isTarget = (b2Anchor.x == coord.x && b2Anchor.y == coord.y && b2Anchor.z == coord.z);
+				// Skip blocks belonging to another tracked slot (unless it's our target).
+				if (!isTarget && protect !is null) {
+					bool other = false;
+					for (uint j = 0; j < protect.Length && !other; j++)
+						if (protect[j].x == b2Anchor.x && protect[j].y == b2Anchor.y && protect[j].z == b2Anchor.z)
+							other = true;
+					if (other) continue;
+				}
+				// Use the scan coord (where GetBlock found it); retry at anchor if needed.
+				map.RemoveBlock(scanCoord);
+				while (!map.IsEditorReadyForRequest) { yield(); }
+				if (map.GetBlock(scanCoord) !is null) {
+					map.RemoveBlock(b2Anchor);
+					while (!map.IsEditorReadyForRequest) { yield(); }
+				}
+				if (GetBlockAt(map, coord) is null) return true;
+			}
+		}
+	}
+
+	return GetBlockAt(map, coord) is null;
+}
+
 // ── Clear helper ──────────────────────────────────────────────────────────────
 
 void ClearPlaced(CGameEditorPluginMap@ map, array<int3> &in coords)
 {
 	for (uint i = 0; i < coords.Length; i++) {
-		while (!map.IsEditorReadyForRequest) { yield(); }
-		auto b = map.GetBlock(coords[i]);
-		if (b !is null) {
-			string foundName = b.BlockModel.IdName;
-			int3 foundCoord = int3(b.CoordX, b.CoordY, b.CoordZ);
-			map.RemoveBlock(foundCoord);
-			// Verify removal succeeded.
-			while (!map.IsEditorReadyForRequest) { yield(); }
-			auto bCheck = map.GetBlock(coords[i]);
-			if (bCheck !is null)
-				TGprint("V4 clear [" + tostring(i) + "]: REMOVAL FAILED for '" + foundName + "' at " + tostring(foundCoord) + " — block still present");
-			continue;
-		}
-		// GetBlock returned null — this can happen for large blocks (Curve4 etc.)
-		// whose canonical anchor is not queryable via GetBlock.
-		// Option A: try RemoveBlock at the logged coord directly first — for some
-		// large blocks RemoveBlock succeeds even when GetBlock at the same coord
-		// returns null.
-		map.RemoveBlock(coords[i]);
-		while (!map.IsEditorReadyForRequest) { yield(); }
-
-		// Option B: ±6 scan for the queryable cell, but skip any block whose
-		// reported anchor matches another tracked slot — that block will be
-		// handled when we reach its own index, and removing it here would leave
-		// the actual target untouched.
-		bool removed = false;
-		for (int xOff = -6; xOff <= 6 && !removed; xOff++) {
-			for (int zOff = -6; zOff <= 6 && !removed; zOff++) {
-				if (xOff == 0 && zOff == 0) continue;
-				for (int yOff = -1; yOff <= 1 && !removed; yOff++) {
-					int3 scanCoord = int3(coords[i].x + xOff, coords[i].y + yOff, coords[i].z + zOff);
-					while (!map.IsEditorReadyForRequest) { yield(); }
-					auto b2 = map.GetBlock(scanCoord);
-					if (b2 is null) continue;
-					// Skip blocks that belong to a different tracked slot.
-					int3 b2Anchor = int3(b2.CoordX, b2.CoordY, b2.CoordZ);
-					bool otherSlot = false;
-					for (uint j = 0; j < coords.Length && !otherSlot; j++) {
-						if (j != i && coords[j].x == b2Anchor.x && coords[j].y == b2Anchor.y && coords[j].z == b2Anchor.z)
-							otherSlot = true;
-					}
-					if (otherSlot) continue;
-					TGprint("V4 clear [" + tostring(i) + "]: found '" + b2.BlockModel.IdName + "' at offset <" + tostring(xOff) + "," + tostring(yOff) + "," + tostring(zOff) + ">  anchor=<" + tostring(b2.CoordX) + "," + tostring(b2.CoordY) + "," + tostring(b2.CoordZ) + ">  logged=" + tostring(coords[i]));
-					// Use the scan coord (where GetBlock found it) for RemoveBlock —
-					// calling RemoveBlock at the anchor can silently fail if GetBlock
-					// at that exact anchor coord also returns null.
-					map.RemoveBlock(scanCoord);
-					while (!map.IsEditorReadyForRequest) { yield(); }
-					auto bVerify = map.GetBlock(scanCoord);
-					if (bVerify !is null)
-						TGprint("V4 clear [" + tostring(i) + "]: REMOVAL FAILED at scanCoord=" + tostring(scanCoord) + " — retrying at anchor");
-					else
-						removed = true;
-					if (!removed) {
-						// Retry at anchor in case engine needs canonical coord.
-						map.RemoveBlock(b2Anchor);
-						while (!map.IsEditorReadyForRequest) { yield(); }
-						removed = true;
-					}
-				}
-			}
-		}
-		if (!removed) {
-			// Direct remove (Option A) was already attempted above.
-			TGprint("V4 clear [" + tostring(i) + "]: MISSED — nothing found at " + tostring(coords[i]) + " or within 2D ±6 grid (direct remove already attempted)");
-		}
+		if (!RemoveBlockRobust(map, coords[i], coords))
+			TGprint("V4 clear [" + tostring(i) + "]: MISSED — could not remove block at " + tostring(coords[i]));
 	}
 }
 
@@ -1163,53 +1173,9 @@ void DebugRemoveAtCoord()
 	int3 coord = int3(g_dbgRemX, g_dbgRemY, g_dbgRemZ);
 	TGprint("DebugRemove: attempting removal at " + tostring(coord));
 
-	while (!map.IsEditorReadyForRequest) { yield(); }
-
-	// Step 1: try GetBlock at the exact coord.
-	auto b = map.GetBlock(coord);
-	if (b !is null) {
-		string name = b.BlockModel.IdName;
-		int3 anchor = int3(b.CoordX, b.CoordY, b.CoordZ);
-		TGprint("DebugRemove: GetBlock found '" + name + "' anchor=" + tostring(anchor));
-		map.RemoveBlock(anchor);
-		while (!map.IsEditorReadyForRequest) { yield(); }
-		auto check = map.GetBlock(coord);
-		TGprint("DebugRemove: after remove — GetBlock=" + (check is null ? "null (success)" : "'" + check.BlockModel.IdName + "' (FAILED)"));
-		return;
-	}
-
-	// Step 2: direct RemoveBlock at coord (works for some large blocks).
-	TGprint("DebugRemove: GetBlock=null, trying direct RemoveBlock");
-	map.RemoveBlock(coord);
-	while (!map.IsEditorReadyForRequest) { yield(); }
-
-	// Step 3: ±6 scan (same as ClearPlaced).
-	bool removed = false;
-	for (int xOff = -6; xOff <= 6 && !removed; xOff++) {
-		for (int zOff = -6; zOff <= 6 && !removed; zOff++) {
-			if (xOff == 0 && zOff == 0) continue;
-			for (int yOff = -1; yOff <= 1 && !removed; yOff++) {
-				int3 scan = int3(coord.x + xOff, coord.y + yOff, coord.z + zOff);
-				while (!map.IsEditorReadyForRequest) { yield(); }
-				auto b2 = map.GetBlock(scan);
-				if (b2 is null) continue;
-				int3 anch = int3(b2.CoordX, b2.CoordY, b2.CoordZ);
-				TGprint("DebugRemove: scan found '" + b2.BlockModel.IdName + "' at offset <" + tostring(xOff) + "," + tostring(yOff) + "," + tostring(zOff) + "> anchor=" + tostring(anch));
-				map.RemoveBlock(scan);
-				while (!map.IsEditorReadyForRequest) { yield(); }
-				auto verify = map.GetBlock(scan);
-				if (verify is null) { removed = true; TGprint("DebugRemove: removed via scan offset"); }
-				else {
-					map.RemoveBlock(anch);
-					while (!map.IsEditorReadyForRequest) { yield(); }
-					removed = true;
-					TGprint("DebugRemove: removed via anchor retry");
-				}
-			}
-		}
-	}
-
-	if (!removed)
+	if (RemoveBlockRobust(map, coord))
+		TGprint("DebugRemove: removed (verified)");
+	else
 		TGprint("DebugRemove: MISSED — nothing found at " + tostring(coord) + " or within ±6 scan");
 }
 
@@ -1304,7 +1270,8 @@ void Run()
 		bool needsRedo     = false;
 		g_travelDir = GetBlockDirection(startBlock);
 		g_surface   = BlockSurface(startBlock.BlockModel.IdName);
-		auto initDir = g_travelDir;  // saved for direction restore after full backtrack
+		auto initDir     = g_travelDir;  // saved for direction restore after full backtrack
+		auto initSurface = g_surface;    // saved for surface restore when all blocks are popped
 
 		TGprint("\\$0f0\\$sGenerating track (V4 surface-state, surface=" + SURF_PREFIX[int(g_surface)] + ")!");
 
@@ -1536,11 +1503,8 @@ void Run()
 						// height difference, so a missing transition is acceptable.
 						TGprint("V4: SlopeUp exit failed — jump-landing fallback: popping last slope block");
 						int3 popCoord = placedCoords[placedCoords.Length - 1];
-						while (!map.IsEditorReadyForRequest) { yield(); }
-						auto pb = map.GetBlock(popCoord);
-						if (pb !is null) map.RemoveBlock(int3(pb.CoordX, pb.CoordY, pb.CoordZ));
-						else map.RemoveBlock(popCoord);
-						placed--; placedCoords.RemoveLast(); placedDirs.RemoveLast(); placedSurfaces.RemoveLast(); g_surface = (placedSurfaces.Length > 0) ? placedSurfaces[placedSurfaces.Length - 1] : Surface::SurfaceTech;
+						RemoveBlockRobust(map, popCoord, placedCoords);
+						placed--; placedCoords.RemoveLast(); placedDirs.RemoveLast(); placedSurfaces.RemoveLast(); g_surface = (placedSurfaces.Length > 0) ? placedSurfaces[placedSurfaces.Length - 1] : initSurface;
 						prevPos     = (placedCoords.Length > 0) ? placedCoords[placedCoords.Length - 1] : startPos;
 						g_travelDir = (placedDirs.Length   > 0) ? placedDirs[placedDirs.Length - 1]     : initDir;
 						state = SurfaceState::Flat; tiltSide = TiltSide::TiltNone; stateRun = 0;
@@ -1739,11 +1703,8 @@ void Run()
 				// undo it and reset to Flat, then try a flat block from the pre-transition position.
 				if (state != SurfaceState::Flat && stateRun == 0 && placedCoords.Length > 0) {
 					int3 transCoord = placedCoords[placedCoords.Length - 1];
-					while (!map.IsEditorReadyForRequest) { yield(); }
-					auto ub = map.GetBlock(transCoord);
-					if (ub !is null) map.RemoveBlock(int3(ub.CoordX, ub.CoordY, ub.CoordZ));
-					else map.RemoveBlock(transCoord);
-					placed--; placedCoords.RemoveLast(); placedDirs.RemoveLast(); placedSurfaces.RemoveLast(); g_surface = (placedSurfaces.Length > 0) ? placedSurfaces[placedSurfaces.Length - 1] : Surface::SurfaceTech;
+					RemoveBlockRobust(map, transCoord, placedCoords);
+					placed--; placedCoords.RemoveLast(); placedDirs.RemoveLast(); placedSurfaces.RemoveLast(); g_surface = (placedSurfaces.Length > 0) ? placedSurfaces[placedSurfaces.Length - 1] : initSurface;
 					prevPos     = (placedCoords.Length > 0) ? placedCoords[placedCoords.Length - 1] : startPos;
 					g_travelDir = (placedDirs.Length   > 0) ? placedDirs[placedDirs.Length - 1]     : initDir;
 					state = SurfaceState::Flat; tiltSide = TiltSide::TiltNone; stateRun = 0; flatRun = 0;
@@ -1798,13 +1759,10 @@ void Run()
 						string popName = "?";
 						auto pbInfo = GetBlockAt(map, popCoord);
 						if (pbInfo !is null) popName = pbInfo.BlockModel.IdName;
-						TGprint("\\$f80V4: slope-escape pop: removed block [" + tostring(placed) + "] " + popName + " @ " + tostring(popCoord));
-						while (!map.IsEditorReadyForRequest) { yield(); }
-						auto pb = map.GetBlock(popCoord);
-						if (pb !is null) map.RemoveBlock(int3(pb.CoordX, pb.CoordY, pb.CoordZ));
-						else map.RemoveBlock(popCoord);
+						bool popOk = RemoveBlockRobust(map, popCoord, placedCoords);
+						TGprint("\\$f80V4: slope-escape pop: " + (popOk ? "removed" : "FAILED to remove") + " block [" + tostring(placed) + "] " + popName + " @ " + tostring(popCoord));
 						placed--;
-						placedCoords.RemoveLast(); placedDirs.RemoveLast(); placedSurfaces.RemoveLast(); g_surface = (placedSurfaces.Length > 0) ? placedSurfaces[placedSurfaces.Length - 1] : Surface::SurfaceTech;
+						placedCoords.RemoveLast(); placedDirs.RemoveLast(); placedSurfaces.RemoveLast(); g_surface = (placedSurfaces.Length > 0) ? placedSurfaces[placedSurfaces.Length - 1] : initSurface;
 						prevPos     = (placedCoords.Length > 0) ? placedCoords[placedCoords.Length - 1] : startPos;
 						g_travelDir = (placedDirs.Length   > 0) ? placedDirs[placedDirs.Length - 1]     : initDir;
 						state = SurfaceState::Flat; tiltSide = TiltSide::TiltNone; stateRun = 0; flatRun = 0;
@@ -1821,12 +1779,9 @@ void Run()
 							    pn == GetTiltUpLeft() || pn == GetTiltUpRight() ||
 							    pn == GetTiltDownLeft() || pn == GetTiltDownRight()) {
 								TGprint("\\$f80V4: slope-escape also pops transition block [" + tostring(placed) + "] " + pn + " @ " + tostring(prevPos));
-								while (!map.IsEditorReadyForRequest) { yield(); }
-								auto tb = map.GetBlock(prevPos);
-								if (tb !is null) map.RemoveBlock(int3(tb.CoordX, tb.CoordY, tb.CoordZ));
-								else map.RemoveBlock(prevPos);
+								RemoveBlockRobust(map, prevPos, placedCoords);
 								placed--;
-								placedCoords.RemoveLast(); placedDirs.RemoveLast(); placedSurfaces.RemoveLast(); g_surface = (placedSurfaces.Length > 0) ? placedSurfaces[placedSurfaces.Length - 1] : Surface::SurfaceTech;
+								placedCoords.RemoveLast(); placedDirs.RemoveLast(); placedSurfaces.RemoveLast(); g_surface = (placedSurfaces.Length > 0) ? placedSurfaces[placedSurfaces.Length - 1] : initSurface;
 								prevPos     = (placedCoords.Length > 0) ? placedCoords[placedCoords.Length - 1] : startPos;
 								g_travelDir = (placedDirs.Length   > 0) ? placedDirs[placedDirs.Length - 1]     : initDir;
 							}
@@ -1846,10 +1801,7 @@ void Run()
 						int3 p2 = PlaceConnected(map, p1, escSlopeStart);
 						if (p2.x < 0) {
 							TGprint("\\$f80  slope-escape: " + escSlopeStart + " failed, removing [" + tostring(placed+1) + "] " + escSlopeEnd + " @ " + tostring(p1));
-							while (!map.IsEditorReadyForRequest) { yield(); }
-							auto rb1 = map.GetBlock(p1);
-							if (rb1 !is null) map.RemoveBlock(int3(rb1.CoordX, rb1.CoordY, rb1.CoordZ));
-							else map.RemoveBlock(p1);
+							RemoveBlockRobust(map, p1, placedCoords);
 							continue;
 						}
 						TGprint("V4 [" + tostring(placed+2) + "] " + escSlopeStart + " (escape-exit) @ " + tostring(p2) + "  dir=" + DirStr(g_travelDir));
@@ -1866,14 +1818,8 @@ void Run()
 						int3 p3 = PlaceConnected(map, p2, escFlat);
 						if (p3.x < 0) {
 							TGprint("\\$f80  slope-escape: flat failed, removing [" + tostring(placed+2) + "] " + escSlopeStart + " @ " + tostring(p2) + " and [" + tostring(placed+1) + "] " + escSlopeEnd + " @ " + tostring(p1));
-							while (!map.IsEditorReadyForRequest) { yield(); }
-							auto rb2 = map.GetBlock(p2);
-							if (rb2 !is null) map.RemoveBlock(int3(rb2.CoordX, rb2.CoordY, rb2.CoordZ));
-							else map.RemoveBlock(p2);
-							while (!map.IsEditorReadyForRequest) { yield(); }
-							auto rb1 = map.GetBlock(p1);
-							if (rb1 !is null) map.RemoveBlock(int3(rb1.CoordX, rb1.CoordY, rb1.CoordZ));
-							else map.RemoveBlock(p1);
+							RemoveBlockRobust(map, p2, placedCoords);
+							RemoveBlockRobust(map, p1, placedCoords);
 							continue;
 						}
 						TGprint("V4 [" + tostring(placed+3) + "] " + escFlat + " (escape-flat) @ " + tostring(p3) + "  dir=" + DirStr(g_travelDir));
