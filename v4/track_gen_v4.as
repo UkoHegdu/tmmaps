@@ -197,6 +197,7 @@ array<int3> lastRunCoords;
 
 // Coord of the auto-placed start block (int3(-1,-1,-1) if user placed it manually).
 int3 g_placedStartCoord = int3(-1, -1, -1);
+int3 g_startPos         = int3(-1, -1, -1); // set at generation start; candidates landing here are skipped
 
 // Probe block used by CheckDirectionForBlocks — set from the UI dropdown before calling.
 string g_checkDirProbeName = "RoadTechStraight";
@@ -772,6 +773,7 @@ int3 PlaceConnected(CGameEditorPluginMap@ map, int3 prevPos, const string &in bl
 			auto dir   = c.dirs[r];
 			auto coord = int3(prevPos.x + c.offsets[r].x, prevPos.y + c.offsets[r].y, prevPos.z + c.offsets[r].z);
 			if (dir != forceDir) continue;
+			if (coord == g_startPos) continue;
 			uint preLen = GetApp().RootMap.Blocks.Length;
 			if (PlaceBlock(map, blockName, dir, coord)) {
 				g_travelDir = dir;
@@ -786,6 +788,7 @@ int3 PlaceConnected(CGameEditorPluginMap@ map, int3 prevPos, const string &in bl
 		auto dir   = c.dirs[r];
 		auto coord = int3(prevPos.x + c.offsets[r].x, prevPos.y + c.offsets[r].y, prevPos.z + c.offsets[r].z);
 		if (dir == backDir) continue;
+		if (coord == g_startPos) continue;
 		uint preLen = GetApp().RootMap.Blocks.Length;
 		if (PlaceBlock(map, blockName, dir, coord)) {
 			int3 placed = FindNewlyPlacedBlock(blockName, preLen, coord);
@@ -803,6 +806,7 @@ int3 PlaceConnected(CGameEditorPluginMap@ map, int3 prevPos, const string &in bl
 		auto dir   = c.dirs[r];
 		auto coord = int3(prevPos.x + c.offsets[r].x, prevPos.y + c.offsets[r].y, prevPos.z + c.offsets[r].z);
 		if (dir != backDir) continue;
+		if (coord == g_startPos) continue;
 		uint preLen = GetApp().RootMap.Blocks.Length;
 		if (PlaceBlock(map, blockName, dir, coord)) {
 			int3 placed = FindNewlyPlacedBlock(blockName, preLen, coord);
@@ -1270,6 +1274,7 @@ void Run()
 		bool needsRedo     = false;
 		g_travelDir = GetBlockDirection(startBlock);
 		g_surface   = BlockSurface(startBlock.BlockModel.IdName);
+		g_startPos       = startPos;
 		auto initDir     = g_travelDir;  // saved for direction restore after full backtrack
 		auto initSurface = g_surface;    // saved for surface restore when all blocks are popped
 
@@ -1789,16 +1794,16 @@ void Run()
 					}
 
 						string escSlopeEnd   = GetSlopeEnd();
-						// For Platform: use the smaller Start2 block only (better fit in tight spaces).
-						string escSlopeStart = GetSlopeStart2().Length > 0 ? GetSlopeStart2() : GetSlopeStart();
+						// SlopeDown exit: reversed SlopeStart — mirrors ExitSlope(SlopeDown).
+						string escSlopeStart = GetSlopeStart();
 						TGprint("  slope-escape: trying " + escSlopeEnd + " from " + tostring(prevPos) + "  reverseDir=" + DirStr(IntToDir((DirToInt(g_travelDir)+2)%4)));
 						int3 p1 = PlaceReversedConnected(map, prevPos, escSlopeEnd);
 						if (p1.x < 0) { TGprint("  slope-escape: " + escSlopeEnd + " failed"); continue; }
 						TGprint("V4 [" + tostring(placed+1) + "] " + escSlopeEnd + " (escape-entry) @ " + tostring(p1) + "  dir=" + DirStr(g_travelDir));
 						auto afterSlopeEndDir = g_travelDir;
 
-						TGprint("  slope-escape: trying " + escSlopeStart + " from " + tostring(p1) + "  travelDir=" + DirStr(g_travelDir));
-						int3 p2 = PlaceConnected(map, p1, escSlopeStart);
+						TGprint("  slope-escape: trying " + escSlopeStart + " (reversed) from " + tostring(p1) + "  travelDir=" + DirStr(g_travelDir));
+						int3 p2 = PlaceReversedConnected(map, p1, escSlopeStart);
 						if (p2.x < 0) {
 							TGprint("\\$f80  slope-escape: " + escSlopeStart + " failed, removing [" + tostring(placed+1) + "] " + escSlopeEnd + " @ " + tostring(p1));
 							RemoveBlockRobust(map, p1, placedCoords);
@@ -2012,10 +2017,17 @@ void CheckDirectionForBlocks()
 	auto allB = GetApp().RootMap.Blocks;
 	if (allB.Length == 0) { TGprint("CheckDir: no blocks on map."); return; }
 
-	auto b = allB[allB.Length - 1];
+	CGameCtnBlock@ b = null;
+	for (int i = int(allB.Length) - 1; i >= 0; i--) {
+		if (BlockKindFromIdName(allB[i].BlockModel.IdName) == "Track") {
+			@b = allB[i];
+			break;
+		}
+	}
+	if (b is null) { TGprint("CheckDir: no track block found on map."); return; }
 	int3 bCoord = int3(b.CoordX, b.CoordY, b.CoordZ);
 	string bName = b.BlockModel.IdName;
-	TGprint("CheckDir: last block = '" + bName + "'  anchor=" + tostring(bCoord));
+	TGprint("CheckDir: source block = '" + bName + "'  anchor=" + tostring(bCoord));
 
 	string probeName = g_checkDirProbeName;
 	auto probeInfo = map.GetBlockModelFromName(probeName);

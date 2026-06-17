@@ -4,35 +4,6 @@ bool HAS_ADVANCED_EDITOR = false;
 bool display = false, preloaded = false;
 // Debug block removal tool state
 int g_dbgRemX = 0, g_dbgRemY = 0, g_dbgRemZ = 0;
-int g_checkDirProbeIdx = 0;
-const array<string> CHECK_DIR_LABELS = {
-	"1 · Straight",
-	"2 · TiltTrans UpLeft",
-	"3 · TiltTrans DownRight",
-	"4 · SlopeEnd 2x1",
-	"5 · SlopeStart 2x1",
-	"6 · TiltStraight",
-	"7 · SlopeStraightR",
-	"8 · Dirt Straight",
-	"9 · Dirt SlopeStart 2x1",
-	"10 · Dirt SlopeEnd 2x1",
-	"11 · Dirt SlopeStraight",
-	"12 · TiltCurve2Out"
-};
-const array<string> CHECK_DIR_BLOCKS = {
-	"RoadTechStraight",
-	"RoadTechTiltTransition1UpLeft",
-	"RoadTechTiltTransition1DownRight",
-	"RoadTechSlopeEnd2x1",
-	"RoadTechSlopeStart2x1",
-	"RoadTechTiltStraight",
-	"RoadTechSlopeStraight",
-	"RoadDirtStraight",
-	"RoadDirtSlopeStart2x1",
-	"RoadDirtSlopeEnd2x1",
-	"RoadDirtSlopeStraight",
-	"RoadTechTiltCurve2Out"
-};
 bool tabTrack = true, tabScenery = false, tabSettings = false, tabDev = false;
 int st_maxBlocks = 200;
 //--
@@ -123,19 +94,21 @@ void RenderTrackGenerator()
 	if (UI::Button(Icons::Trash + " Clear Track")) {
 		startnew(v4::ClearLastRun);
 	}
+
+	string destLabel = v4::g_checkDirProbeName.Length > 0 ? v4::g_checkDirProbeName : "(none)";
+	UI::TextDisabled("Dest: " + destLabel);
 	UI::SameLine();
-	UI::SetNextItemWidth(160);
-	if (UI::BeginCombo("##probe", CHECK_DIR_LABELS[g_checkDirProbeIdx])) {
-		for (uint i = 0; i < CHECK_DIR_LABELS.Length; i++) {
-			if (UI::Selectable(CHECK_DIR_LABELS[i], g_checkDirProbeIdx == int(i))) {
-				g_checkDirProbeIdx = i;
+	if (UI::Button(Icons::Download + " Load as dest")) {
+		auto allB = GetApp().RootMap.Blocks;
+		for (int i = int(allB.Length) - 1; i >= 0; i--) {
+			if (BlockKindFromIdName(allB[i].BlockModel.IdName) == "Track") {
+				v4::g_checkDirProbeName = allB[i].BlockModel.IdName;
+				break;
 			}
 		}
-		UI::EndCombo();
 	}
 	UI::SameLine();
-	if (UI::Button(Icons::Search + " Check direction")) {
-		v4::g_checkDirProbeName = CHECK_DIR_BLOCKS[g_checkDirProbeIdx];
+	if (UI::Button(Icons::Search + " Check connections")) {
 		startnew(v4::CheckDirectionForBlocks);
 	}
 

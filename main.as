@@ -1092,7 +1092,7 @@ void DiagBlockConnectionCheck()
 		for (uint r = 0; r < map.ConnectResults.Length; r++) {
 			auto res = map.ConnectResults[r];
 			if (res is null) continue;
-			auto dir = v4::ConvertDir(res.Dir);
+			auto dir = ConvertDir(res.Dir);
 			TGprint("  [" + tostring(r) + "] dir=" + v4::DirStr(dir)
 				+ "  coord=" + tostring(res.Coord)
 				+ "  CanPlace=" + (res.CanPlace ? "YES" : "NO"));
