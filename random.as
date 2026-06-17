@@ -2,14 +2,20 @@ bool seedEnabled = false;
 string seedText = "OPENPLANET";
 double seedDouble = 0;
 
+// Returns a random int in [a, b] — INCLUSIVE of both ends. All call sites use the
+// inclusive convention (e.g. MathRand(0, len-1) for indexing, MathRand(0, 1) for a
+// coin flip). Openplanet's Math::Rand(min, max) is max-EXCLUSIVE, so we pass b + 1.
+// (Without the +1 the top value was never produced: the last pool entry was never
+// picked — e.g. the last surface in a switch list — and MathRand(0,1) was always 0,
+// freezing every coin flip to one side.)
 int MathRand(int a, int b)
 {
 	if (seedEnabled)
 	{
-		return RandomFromSeed(a, b);
+		return RandomFromSeed(a, b + 1);
 	}
-	
-	return Math::Rand(a, b);
+
+	return Math::Rand(a, b + 1);
 }
 
 

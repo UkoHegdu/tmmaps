@@ -45,6 +45,10 @@ const string RAMP_ESCAPE = "RoadTechRampLow";
 // Safe playable range: X in [2..45], Z in [2..45].
 const int STADIUM_WALL_MIN  = 2;
 const int STADIUM_WALL_MAX  = 45;
+// Ground terrain sits at Y=9; placing on/below it desyncs against the floor (scanned=Grass).
+// Keep block anchors at or above this so descending slopes (which reach one cell below their
+// anchor) stay clear of the ground. Bump to 11 if a descent still grazes the floor.
+const int STADIUM_FLOOR_MIN = 10;
 const int STADIUM_EXIT_DIST = 10;  // exit slope/tilt when fewer than this blocks ahead
 const int STADIUM_TURN_DIST = 5;   // force a turn when fewer than this blocks ahead (flat)
 
@@ -224,6 +228,11 @@ array<string> tiltRightBasePool;
 // Probability (0-99) that a Ramp or Special block pick is kept.
 // 20 = 80% reduction (only 1 in 5 picks that land on Ramp/Special are accepted).
 const int RAMP_SPECIAL_KEEP_CHANCE = 20;
+// Stadium mode: curves dead-end far more often than straights in the tight arena and
+// make turns feel cramped. When a curve is randomly rolled for a flat section, keep it
+// only this % of the time; otherwise re-roll toward a non-curve block. Does NOT affect
+// forced wall-avoidance turns — those still place curves on purpose.
+const int STADIUM_CURVE_KEEP_CHANCE = 25;
 
 // Current forward travel direction — set at generation start, updated by PlaceConnected.
 CGameEditorPluginMap::ECardinalDirections g_travelDir;
@@ -259,6 +268,20 @@ string DirStr(CGameEditorPluginMap::ECardinalDirections d)
 		case CGameEditorPluginMap::ECardinalDirections::West:  return "W";
 	}
 	return "?";
+}
+
+// Hard stadium boundary: in stadium mode, no block may be placed outside the safe
+// X/Z margins [STADIUM_WALL_MIN..STADIUM_WALL_MAX], nor on/below the ground floor
+// (Y < STADIUM_FLOOR_MIN). There is no ceiling limit yet — escapes only descend, so
+// the track never climbs into one (revisit when escape becomes bidirectional).
+// Returns false when stadium mode is off, so callers can guard every placement
+// unconditionally.
+bool OutOfStadiumBounds(int3 coord)
+{
+	if (!st_stadiumMode) return false;
+	return coord.x < STADIUM_WALL_MIN || coord.x > STADIUM_WALL_MAX
+		|| coord.z < STADIUM_WALL_MIN || coord.z > STADIUM_WALL_MAX
+		|| coord.y < STADIUM_FLOOR_MIN;
 }
 
 // Distance from pos to the wall ahead in dir, using the stadium safe margins.
@@ -447,6 +470,19 @@ void LoadPools()
 		+ "  slopeDown: " + tostring(slopeDownPool.Length)
 		+ "  tiltL: " + tostring(tiltLeftPool.Length)
 		+ "  tiltR: " + tostring(tiltRightPool.Length));
+
+	// Diagnostic: how many FLAT blocks each surface contributed. A surface that was
+	// toggled on but shows 0 here means its block file didn't load (missing/empty/path).
+	TGprint("V4 block data path: " + GetBlockDataPath());
+	string surfCounts = "";
+	for (int s = 0; s < int(Surface::SURFACE_COUNT); s++) {
+		string pfx = SURF_PREFIX[s];
+		int cnt = 0;
+		for (uint i = 0; i < flatPool.Length; i++)
+			if (int(flatPool[i].Length) >= int(pfx.Length) && flatPool[i].SubStr(0, pfx.Length) == pfx) cnt++;
+		if (cnt > 0) surfCounts += "  " + pfx + "=" + tostring(cnt);
+	}
+	TGprint("V4 flat pool by surface:" + surfCounts);
 }
 
 // ── Surface helpers ───────────────────────────────────────────────────────────
@@ -536,6 +572,22 @@ string PickFiltered(const array<string>@ pool, const array<string>@ basePool)
 	if (pick.IndexOf("Ramp") < 0 && pick.IndexOf("Special") < 0) return pick;
 	if (MathRand(0, 99) < RAMP_SPECIAL_KEEP_CHANCE) return pick;
 	return PickFromPool(basePool);
+}
+
+// Flat-section pick with stadium curve down-weighting. In stadium mode, if a curve is
+// rolled, keep it only STADIUM_CURVE_KEEP_CHANCE% of the time and otherwise re-roll
+// toward a non-curve flat block. Outside stadium mode it behaves like PickFiltered.
+// Forced wall-avoidance turns bypass this (they set targetBlock directly).
+string PickFlat()
+{
+	string pick = PickFiltered(flatPool, flatBasePool);
+	if (!st_stadiumMode || pick.IndexOf("Curve") < 0) return pick;
+	if (MathRand(0, 99) < STADIUM_CURVE_KEEP_CHANCE) return pick;
+	for (int attempt = 0; attempt < 5; attempt++) {
+		string p2 = PickFiltered(flatPool, flatBasePool);
+		if (p2.IndexOf("Curve") < 0) return p2;
+	}
+	return pick;  // pool is curve-heavy — accept what we rolled
 }
 
 // ── Placement helpers ────────────────────────────────────────────────────────────────────────────
@@ -755,6 +807,8 @@ int3 PlaceConnected(CGameEditorPluginMap@ map, int3 prevPos, const string &in bl
 		auto dir   = c.dirs[r];
 		auto coord = int3(prevPos.x + c.offsets[r].x, prevPos.y + c.offsets[r].y, prevPos.z + c.offsets[r].z);
 		if (dir != preferDir) continue;
+		if (coord == g_startPos) continue;
+		if (OutOfStadiumBounds(coord)) continue;
 		uint preLen = GetApp().RootMap.Blocks.Length;
 		if (PlaceBlock(map, blockName, dir, coord)) {
 			int3 placed = FindNewlyPlacedBlock(blockName, preLen, coord);
@@ -774,6 +828,7 @@ int3 PlaceConnected(CGameEditorPluginMap@ map, int3 prevPos, const string &in bl
 			auto coord = int3(prevPos.x + c.offsets[r].x, prevPos.y + c.offsets[r].y, prevPos.z + c.offsets[r].z);
 			if (dir != forceDir) continue;
 			if (coord == g_startPos) continue;
+			if (OutOfStadiumBounds(coord)) continue;
 			uint preLen = GetApp().RootMap.Blocks.Length;
 			if (PlaceBlock(map, blockName, dir, coord)) {
 				g_travelDir = dir;
@@ -789,6 +844,7 @@ int3 PlaceConnected(CGameEditorPluginMap@ map, int3 prevPos, const string &in bl
 		auto coord = int3(prevPos.x + c.offsets[r].x, prevPos.y + c.offsets[r].y, prevPos.z + c.offsets[r].z);
 		if (dir == backDir) continue;
 		if (coord == g_startPos) continue;
+		if (OutOfStadiumBounds(coord)) continue;
 		uint preLen = GetApp().RootMap.Blocks.Length;
 		if (PlaceBlock(map, blockName, dir, coord)) {
 			int3 placed = FindNewlyPlacedBlock(blockName, preLen, coord);
@@ -807,6 +863,7 @@ int3 PlaceConnected(CGameEditorPluginMap@ map, int3 prevPos, const string &in bl
 		auto coord = int3(prevPos.x + c.offsets[r].x, prevPos.y + c.offsets[r].y, prevPos.z + c.offsets[r].z);
 		if (dir != backDir) continue;
 		if (coord == g_startPos) continue;
+		if (OutOfStadiumBounds(coord)) continue;
 		uint preLen = GetApp().RootMap.Blocks.Length;
 		if (PlaceBlock(map, blockName, dir, coord)) {
 			int3 placed = FindNewlyPlacedBlock(blockName, preLen, coord);
@@ -817,6 +874,77 @@ int3 PlaceConnected(CGameEditorPluginMap@ map, int3 prevPos, const string &in bl
 			g_travelDir = detected;
 			TGprint("    PlaceConnected pass3 (backDir): placed " + blockName + " @ " + tostring(placed) + "  dir=" + DirStr(dir) + "  detectedHeading=" + DirStr(detected));
 			return placed;
+		}
+	}
+	return int3(-1, -1, -1);
+}
+
+// Try to place a Finish connected to prevPos. Platform blocks transition freely,
+// so this is forgiving: first the natural connect (any non-backward direction/state
+// via PlaceConnected), then the same candidates one level below (Y-1). Returns the
+// placed coord, or (-1,-1,-1) if nothing fit.
+int3 PlaceFinish(CGameEditorPluginMap@ map, int3 prevPos, const string &in finishName)
+{
+	// 1) Natural connect — full 4-pass placement in any non-backward direction.
+	int3 fpos = PlaceConnected(map, prevPos, finishName);
+	if (fpos.x >= 0) return fpos;
+
+	// 2) One level below: retry every forward candidate at Y-1.
+	auto prevBlock = GetBlockAt(map, prevPos);
+	if (prevBlock is null) return int3(-1, -1, -1);
+	auto info = map.GetBlockModelFromName(finishName);
+	if (info is null) return int3(-1, -1, -1);
+
+	auto backDir = IntToDir((DirToInt(g_travelDir) + 2) % 4);
+	ConnectCacheEntry@ c = GetConnectCache(map, prevBlock, prevPos, finishName, info);
+	for (uint r = 0; r < c.dirs.Length; r++) {
+		auto dir = c.dirs[r];
+		if (dir == backDir) continue;
+		int3 coord = int3(prevPos.x + c.offsets[r].x, prevPos.y + c.offsets[r].y - 1, prevPos.z + c.offsets[r].z);
+		if (coord == g_startPos) continue;
+		if (OutOfStadiumBounds(coord)) continue;
+		uint preLen = GetApp().RootMap.Blocks.Length;
+		if (PlaceBlock(map, finishName, dir, coord)) {
+			int3 placedF = FindNewlyPlacedBlock(finishName, preLen, coord);
+			TGprint("    finish placed one level below at " + tostring(placedF));
+			return placedF;
+		}
+	}
+
+	// 3) Platform borderless: drop the finish into any free neighbour cell, ignoring
+	//    connection geometry — same trick as the flat-adjacent escape. No-op on road.
+	int3 adj = PlaceBorderlessAdjacent(map, prevPos, finishName);
+	if (adj.x >= 0) return adj;
+
+	return int3(-1, -1, -1);
+}
+
+// Platform-only: drop blockName into any free, in-bounds neighbour cell at the same
+// height, ignoring connection geometry. Platform blocks have no side borders, so the
+// car can roll between any two edge-adjacent platform blocks even when the editor reports
+// no connection (it may look awkward, but it's drivable). Tries forward, the two sides,
+// then backward; sets g_travelDir toward the chosen cell. Returns placed coord or (-1,-1,-1).
+int3 PlaceBorderlessAdjacent(CGameEditorPluginMap@ map, int3 prevPos, const string &in blockName)
+{
+	// Borderless behaviour only applies to platform surfaces; road blocks need real connections.
+	if (int(g_surface) < int(Surface::SurfacePlatformTech)) return int3(-1, -1, -1);
+
+	auto backDir = IntToDir((DirToInt(g_travelDir) + 2) % 4);
+	array<CGameEditorPluginMap::ECardinalDirections> order =
+		{ g_travelDir, TurnDirLeft(g_travelDir), TurnDirRight(g_travelDir), backDir };
+
+	for (uint i = 0; i < order.Length; i++) {
+		auto d = order[i];
+		int3 off = MoveDir(d);
+		int3 coord = int3(prevPos.x + off.x, prevPos.y + off.y, prevPos.z + off.z);
+		if (coord == g_startPos) continue;
+		if (OutOfStadiumBounds(coord)) continue;
+		if (!(GetBlockAt(map, coord) is null)) continue;  // cell already occupied
+		uint preLen = GetApp().RootMap.Blocks.Length;
+		if (PlaceBlock(map, blockName, d, coord)) {
+			g_travelDir = d;
+			TGprint("    borderless-adjacent: placed " + blockName + " @ " + tostring(coord) + "  dir=" + DirStr(d));
+			return FindNewlyPlacedBlock(blockName, preLen, coord);
 		}
 	}
 	return int3(-1, -1, -1);
@@ -854,6 +982,8 @@ int3 PlaceReversedConnected(CGameEditorPluginMap@ map, int3 prevPos, const strin
 		auto dir   = c.dirs[r];
 		auto coord = int3(prevPos.x + c.offsets[r].x, prevPos.y + c.offsets[r].y, prevPos.z + c.offsets[r].z);
 		if (dir != reverseDir) continue;
+		if (coord == g_startPos) continue;
+		if (OutOfStadiumBounds(coord)) continue;
 		TGprint("    backDir result: coord=" + tostring(coord) + "  dir=" + DirStr(dir));
 		uint preLen = GetApp().RootMap.Blocks.Length;
 		if (PlaceBlock(map, blockName, dir, coord)) {
@@ -1338,7 +1468,7 @@ void Run()
 					if (surfs.Length > 0) pickSurf = surfs[MathRand(0, int(surfs.Length) - 1)];
 				}
 				string surfCandidate = (pickSurf != g_surface) ? PickFromPoolFor(flatPool, pickSurf) : "";
-				targetBlock = (surfCandidate.Length > 0) ? surfCandidate : PickFiltered(flatPool, flatBasePool);
+				targetBlock = (surfCandidate.Length > 0) ? surfCandidate : PickFlat();
 			} else if (roll < wFlat + wSlope) {
 				targetState = SurfaceState::Slope;
 				// Use directional pool when already in slope, full pool otherwise
@@ -1751,7 +1881,21 @@ void Run()
 						TGprint("V4: flat-fallback succeeded, placed [" + tostring(placed) + "]");
 						continue;
 					}
-					TGprint("V4: flat-fallback failed -- trying slope-escape");
+					TGprint("V4: flat-fallback failed -- trying flat-adjacent escape");
+				}
+
+				// Fallback 2.5 (platform only): drop a flat block into any free neighbour,
+				// ignoring connection geometry — platform blocks are borderless. Keeps the
+				// track flat/same-level and avoids an unnecessary downward dive.
+				{
+					int3 adj = PlaceBorderlessAdjacent(map, prevPos, GetStraight());
+					if (adj.x >= 0) {
+						placed++; placedCoords.InsertLast(adj); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface);
+						prevPos = adj; state = SurfaceState::Flat; stateRun = 0; flatRun = 1;
+						TGprint("V4: flat-adjacent escape succeeded, placed [" + tostring(placed) + "]");
+						continue;
+					}
+					TGprint("V4: flat-adjacent escape failed -- trying slope-escape");
 				}
 
 				// Fallback 3+4: slope-down escape — pop 1 then 2 blocks one at a time.
@@ -1877,36 +2021,49 @@ void Run()
 			if (p.x >= 0) { prevPos = p; placed++; placedCoords.InsertLast(p); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface); state = SurfaceState::Flat; tiltSide = TiltSide::TiltNone; }
 		}
 
-		// ── Place Finish ──────────────────────────────────────────────────
+		// ── Place Finish (mandatory) ──────────────────────────────────────
+		// A track is invalid without a Finish, so this is best-effort-until-success:
+		// try to connect a Finish at prevPos; if it won't fit, pop the last block and
+		// retry from the previous position. Block count is not important here.
 
 		string finishName = SURF_PREFIX[int(g_surface)] + "Finish";
-		auto prevBlock = GetBlockAt(map, prevPos);
-		if (prevBlock !is null) {
-			auto finishInfo = map.GetBlockModelFromName(finishName);
-			if (finishInfo is null && finishName != "RoadTechFinish") {
-				TGprint("V4: " + finishName + " not found, falling back to RoadTechFinish");
-				finishName = "RoadTechFinish";
-				@finishInfo = map.GetBlockModelFromName(finishName);
+		if (map.GetBlockModelFromName(finishName) is null && finishName != "RoadTechFinish") {
+			TGprint("V4: " + finishName + " not found, falling back to RoadTechFinish");
+			finishName = "RoadTechFinish";
+		}
+
+		// Try a finish at the end (natural connect, then one level below). If it still
+		// won't fit, pop the last block and retry — at most 2 pops.
+		bool finishPlaced = false;
+		for (int ftry = 0; ftry < 3 && !finishPlaced && placedCoords.Length > 0; ftry++) {
+			int3 fpos = PlaceFinish(map, prevPos, finishName);
+			if (fpos.x >= 0) {
+				placed++;
+				placedCoords.InsertLast(fpos); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface);
+				prevPos = fpos;
+				TGprint("\\$0f0V4 Finish placed at " + tostring(fpos));
+				finishPlaced = true;
+				break;
 			}
-			if (finishInfo is null) {
-				TGprint("\\$f00V4: GetBlockModelFromName failed for '" + finishName + "'");
-			} else {
-				while (!map.IsEditorReadyForRequest) { yield(); }
-				map.GetConnectResults(prevBlock, finishInfo);
-				while (!map.IsEditorReadyForRequest) { yield(); }
-				for (uint r = 0; r < map.ConnectResults.Length; r++) {
-					auto res = map.ConnectResults[r];
-					if (res is null || !res.CanPlace) continue;
-					auto coord = res.Coord;
-					auto dir   = ConvertDir(res.Dir);
-					if (CanPlaceBlock(map, finishName, dir, coord)) {
-						PlaceBlock(map, finishName, dir, coord);
-						placedCoords.InsertLast(coord); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface);
-						TGprint("V4 Finish placed at " + tostring(coord));
-					}
-					break;
-				}
-			}
+			if (ftry >= 2) break;  // already retried after 2 pops — give up
+
+			// Finish didn't fit — pop the last placed block and retry one block earlier.
+			int3 popCoord = placedCoords[placedCoords.Length - 1];
+			string popName = "?";
+			auto pbInfo = GetBlockAt(map, popCoord);
+			if (pbInfo !is null) popName = pbInfo.BlockModel.IdName;
+			RemoveBlockRobust(map, popCoord, placedCoords);
+			TGprint("\\$f80V4: finish didn't fit at " + tostring(prevPos) + " — popped [" + tostring(placed) + "] " + popName + " @ " + tostring(popCoord));
+			placed--;
+			placedCoords.RemoveLast(); placedDirs.RemoveLast(); placedSurfaces.RemoveLast();
+			g_surface   = (placedSurfaces.Length > 0) ? placedSurfaces[placedSurfaces.Length - 1] : initSurface;
+			prevPos     = (placedCoords.Length > 0) ? placedCoords[placedCoords.Length - 1] : startPos;
+			g_travelDir = (placedDirs.Length   > 0) ? placedDirs[placedDirs.Length - 1]     : initDir;
+		}
+
+		if (!finishPlaced) {
+			TGprint("\\$f00V4: WARNING — could not place a Finish block after backing up; track has NO finish.");
+			UI::ShowNotification("V4: WARNING — track has no Finish block!");
 		}
 
 		uint64 elapsed = Time::get_Now() - before;
