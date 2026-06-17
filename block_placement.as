@@ -1,3 +1,7 @@
+// Timing accumulators for PlaceBlock — declared here (root file) so PlaceBlock can see them;
+// read/reset by the V4 generator's timing diagnostics (track_gen_v4.as).
+uint64 g_tPlace = 0; int g_nPlace = 0;
+
 bool PlaceBlock(CGameEditorPluginMap@ map, const string blockName, CGameEditorPluginMap::ECardinalDirections dir, int3 point)
 {
     auto info = map.GetBlockModelFromName(blockName);
@@ -7,11 +11,13 @@ bool PlaceBlock(CGameEditorPluginMap@ map, const string blockName, CGameEditorPl
 		ClearPath(map, point);
 	}
 
+    uint64 _t = Time::get_Now();
     while (!map.IsEditorReadyForRequest) {
         yield();
     }
-
-    return map.PlaceBlock(info, point, dir);
+    bool _ok = map.PlaceBlock(info, point, dir);
+    g_tPlace += Time::get_Now() - _t; g_nPlace++;
+    return _ok;
 }
 
 bool CanPlaceBlock(CGameEditorPluginMap@ map, const string blockName, CGameEditorPluginMap::ECardinalDirections dir, int3 point)

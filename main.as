@@ -179,7 +179,18 @@ void FindSuitableBlocksForSlope()
 }
 
 // Return block handle at position from RootMap.Blocks (avoids map.GetBlock return type issues).
+// Timing accumulators for the GetBlockAt block-array scan — declared here (root file) so
+// GetBlockAt can see them; read/reset by the V4 generator's timing diagnostics (track_gen_v4.as).
+uint64 g_tScan = 0; int g_nScan = 0;
+
 CGameCtnBlock@ GetBlockAt(CGameEditorPluginMap@ map, int3 pos)
+{
+	uint64 _t = Time::get_Now();
+	auto _r = GetBlockAtImpl(map, pos);
+	g_tScan += Time::get_Now() - _t; g_nScan++;
+	return _r;
+}
+CGameCtnBlock@ GetBlockAtImpl(CGameEditorPluginMap@ map, int3 pos)
 {
 	auto allBlocks = GetApp().RootMap.Blocks;
 	CGameCtnBlock@ fallback = null;

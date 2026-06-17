@@ -233,6 +233,10 @@ const int RAMP_SPECIAL_KEEP_CHANCE = 20;
 // only this % of the time; otherwise re-roll toward a non-curve block. Does NOT affect
 // forced wall-avoidance turns — those still place curves on purpose.
 const int STADIUM_CURVE_KEEP_CHANCE = 25;
+// Mid-slope curve down-weighting (platform). Same idea as STADIUM_CURVE_KEEP_CHANCE but for
+// slope bodies: when a Slope2Curve is rolled, keep it only this % of the time, else re-roll
+// toward a straight — so slopes aren't curve-spammed once curves are enabled.
+const int SLOPE_CURVE_KEEP_CHANCE = 25;
 
 // Current forward travel direction — set at generation start, updated by PlaceConnected.
 CGameEditorPluginMap::ECardinalDirections g_travelDir;
@@ -240,6 +244,13 @@ CGameEditorPluginMap::ECardinalDirections g_travelDir;
 // Forced exit direction for the next PlaceConnected call — used to steer curves left or right.
 // -1 = no preference (normal behaviour). Consumed and reset inside PlaceConnected.
 int g_forceTurnDirIdx = -1;
+
+// S2S slope↔tilt switch: when set, the next body block is placed SIDE-attached (a ~90° pivot
+// on the dual Slope2Straight) instead of straight ahead — the slope and tilt roles are
+// perpendicular, so continuing straight inverts the slope and produces a \/ kink. Consumed at
+// the placement site. g_s2sSidePref biases which side to pivot toward (TiltNone = either).
+bool g_s2sSideAttach = false;
+TiltSide g_s2sSidePref = TiltSide::TiltNone;
 
 // Slope2Straight forced-transition state lives as loop-local variables inside Run()
 // (s2sForcedTiltSide / s2sHasForcedSlope / s2sForcedSlopeDir) — it is set by the S2S
@@ -304,6 +315,27 @@ bool IsTiltDirectedCurve(const string &in blockName)
 	       lower.IndexOf("downright") >= 0 || lower.IndexOf("upright") >= 0;
 }
 
+// Classify a "## ..." block-data section header. Matches the section keyword on the header
+// NAME only (the text before the first " - "), so descriptive text in the parenthetical —
+// e.g. a TILT header that mentions "Slope2Straight" / "Slope2Left" — is not misread as
+// SLOPE (which the old whole-line ToUpper().IndexOf("SLOPE") check did, dumping banked tilt
+// curves into the slope pool). Returns "" for an unrecognised header so the caller keeps
+// the current section.
+string SectionFromHeader(const string &in headerLine)
+{
+	string name = headerLine;
+	int dash = name.IndexOf(" - ");
+	if (dash >= 0) name = name.SubStr(0, dash);
+	string h = name.ToUpper();
+	if      (h.IndexOf("EXCLUDED")         >= 0) return "EXCLUDED";
+	else if (h.IndexOf("SLOPE TRANSITION") >= 0) return "SLOPE_TRANS";
+	else if (h.IndexOf("TILT TRANSITION")  >= 0) return "TILT_TRANS";
+	else if (h.IndexOf("SLOPE")            >= 0) return "SLOPE";
+	else if (h.IndexOf("TILT")             >= 0) return "TILT";
+	else if (h.IndexOf("FLAT")             >= 0) return "FLAT";
+	return "";
+}
+
 void LoadPools()
 {
 	flatPool.Resize(0);
@@ -321,13 +353,8 @@ void LoadPools()
 			string line = f.ReadLine().Trim();
 
 			if (line.StartsWith("## ")) {
-				string h = line.ToUpper();
-				if      (h.IndexOf("EXCLUDED")        >= 0) section = "EXCLUDED";
-				else if (h.IndexOf("SLOPE TRANSITION") >= 0) section = "SLOPE_TRANS";
-				else if (h.IndexOf("TILT TRANSITION")  >= 0) section = "TILT_TRANS";
-				else if (h.IndexOf("SLOPE")            >= 0) section = "SLOPE";
-				else if (h.IndexOf("TILT")             >= 0) section = "TILT";
-				else if (h.IndexOf("FLAT")             >= 0) section = "FLAT";
+				string sec = SectionFromHeader(line);
+				if (sec.Length > 0) section = sec;
 				continue;
 			}
 
@@ -345,14 +372,16 @@ void LoadPools()
 
 			if (section == "FLAT") {
 				flatPool.InsertLast(line);
-			} else if (section == "SLOPE") {
+			} else if (section == "SLOPE" && line.IndexOf("Special") < 0) {
+				// Special blocks (turbo, no-engine, …) are flat-only — the slope/tilt
+				// variants are buggy, so they never enter the slope/tilt pools.
 				slopePool.InsertLast(line);
 				bool isDown = line.IndexOf("SlopeDown") >= 0;
 				bool isUp   = line.IndexOf("SlopeUp")   >= 0;
 				// Neutral blocks (no SlopeDown/SlopeUp suffix) go into both pools.
 				if (!isDown) slopeUpPool.InsertLast(line);
 				if (!isUp)   slopeDownPool.InsertLast(line);
-			} else if (section == "TILT" && !IsTiltDirectedCurve(line)) {
+			} else if (section == "TILT" && !IsTiltDirectedCurve(line) && line.IndexOf("Special") < 0) {
 				tiltPool.InsertLast(line);
 			}
 		}
@@ -384,13 +413,8 @@ void LoadPools()
 			while (!xf.EOF()) {
 				string line = xf.ReadLine().Trim();
 				if (line.StartsWith("## ")) {
-					string h = line.ToUpper();
-					if      (h.IndexOf("EXCLUDED")        >= 0) xsec = "EXCLUDED";
-					else if (h.IndexOf("SLOPE TRANSITION") >= 0) xsec = "SLOPE_TRANS";
-					else if (h.IndexOf("TILT TRANSITION")  >= 0) xsec = "TILT_TRANS";
-					else if (h.IndexOf("SLOPE")            >= 0) xsec = "SLOPE";
-					else if (h.IndexOf("TILT")             >= 0) xsec = "TILT";
-					else if (h.IndexOf("FLAT")             >= 0) xsec = "FLAT";
+					string sec = SectionFromHeader(line);
+					if (sec.Length > 0) xsec = sec;
 					continue;
 				}
 				if (line.Length == 0 || line.SubStr(0, 1) == "#") continue;
@@ -404,13 +428,14 @@ void LoadPools()
 				    (line.IndexOf("Curve3") >= 0 || line.IndexOf("Curve4") >= 0 || line.IndexOf("Curve5") >= 0)) continue;
 				if (xsec == "FLAT") {
 					flatPool.InsertLast(line);
-				} else if (xsec == "SLOPE" && xSlope[xi]) {
+				} else if (xsec == "SLOPE" && xSlope[xi] && line.IndexOf("Special") < 0) {
+					// Special slope/tilt variants are buggy — flat-only (see roadtech loop).
 					slopePool.InsertLast(line);
 					bool isDown = line.IndexOf("SlopeDown") >= 0;
 					bool isUp   = line.IndexOf("SlopeUp")   >= 0;
 					if (!isDown) slopeUpPool.InsertLast(line);
 					if (!isUp)   slopeDownPool.InsertLast(line);
-				} else if (xsec == "TILT" && xTilt[xi] && !IsTiltDirectedCurve(line)) {
+				} else if (xsec == "TILT" && xTilt[xi] && !IsTiltDirectedCurve(line) && line.IndexOf("Special") < 0) {
 					tiltPool.InsertLast(line);
 				}
 			}
@@ -590,6 +615,35 @@ string PickFlat()
 	return pick;  // pool is curve-heavy — accept what we rolled
 }
 
+// Like PickFiltered but additionally down-weights Curve blocks: keep a rolled curve only
+// SLOPE_CURVE_KEEP_CHANCE% of the time, else re-roll toward a non-curve (straight) body.
+string PickSlopeWeighted(const array<string>@ pool, const array<string>@ basePool)
+{
+	string pick = PickFiltered(pool, basePool);
+	if (pick.IndexOf("Curve") < 0) return pick;
+	if (MathRand(0, 99) < SLOPE_CURVE_KEEP_CHANCE) return pick;
+	for (int attempt = 0; attempt < 5; attempt++) {
+		string p2 = PickFiltered(pool, basePool);
+		if (p2.IndexOf("Curve") < 0) return p2;
+	}
+	return pick;  // pool is curve-heavy — accept what we rolled
+}
+
+// Pick a slope-body block. The first body after the entry transition (stateRun == 0) must be
+// a straight: platform Slope2Curve blocks dock to the SIDE of a Slope2Straight, not to the
+// entry transition block. From the second body on, curves are allowed but down-weighted.
+// Gate is platform-only — GetSlope2Straight() is "" on road, so road keeps prior behaviour.
+string PickSlopeBody(SlopeDir dir, int stateRun)
+{
+	bool up = (dir == SlopeDir::SlopeUp);
+	array<string>@ pool     = up ? slopeUpPool     : slopeDownPool;
+	array<string>@ basePool = up ? slopeUpBasePool : slopeDownBasePool;
+	string s2s = GetSlope2Straight();
+	if (s2s.Length == 0) return PickFiltered(pool, basePool);  // road: unchanged
+	if (stateRun == 0)   return s2s;                           // platform: straight first
+	return PickSlopeWeighted(pool, basePool);                  // platform: down-weighted curves
+}
+
 // ── Placement helpers ────────────────────────────────────────────────────────────────────────────
 
 // Handle stability test — stores the last placed block's handle and coord.
@@ -609,10 +663,36 @@ dictionary g_connectCache;
 int g_cacheHits   = 0;
 int g_cacheMisses = 0;
 
+// ── Timing diagnostics ──────────────────────────────────────────────────────────
+// Accumulated per Run() (reset alongside the cache counters) and printed in the
+// "V4 timing" breakdown. Times are ms (Time::get_Now resolution), so the call
+// COUNT matters as much as the total for sub-ms ops. Categories:
+//   connect = GetConnectResults + its editor-ready spin (engine round-trips)
+//   place   = PlaceBlock (incl. editor-ready spin)
+//   scan    = GetBlockAt + FindNewlyPlacedBlock (linear RootMap.Blocks scans — O(n²) overall)
+//   remove  = RemoveBlockRobust (incl. its ±6 neighbour scan)
+uint64 g_tConnect = 0; int g_nConnect = 0;
+uint64 g_tRemove  = 0; int g_nRemove  = 0;
+// g_tPlace/g_nPlace live in block_placement.as and g_tScan/g_nScan in main.as — next to the
+// functions that write them. Openplanet does not expose globals declared in this v4/ subfolder
+// file to the root files, but root-declared globals ARE visible here, so they're read/reset below.
+// Fallback firing counts — how often the placement ladder had to recover (wasted work).
+int g_nUndoTrans  = 0;  // undid a failed slope/tilt transition block
+int g_nFlatFb     = 0;  // flat-fallback (straight/flat block after a failed pick)
+int g_nBorderless = 0;  // borderless-adjacent escape (platform one-cell nudge)
+int g_nSlopeEsc   = 0;  // slope-escape attempts (pop + reversed slope dive)
+
 // Find the newly placed block by scanning only entries appended after preLen.
 // Also captures the handle into g_dbgLastHandle for the stability test.
 // Relies on TM appending new blocks to the end of the Blocks array.
 int3 FindNewlyPlacedBlock(const string &in blockName, uint preLen, int3 fallback)
+{
+	uint64 _t = Time::get_Now();
+	int3 _r = FindNewlyPlacedBlockImpl(blockName, preLen, fallback);
+	g_tScan += Time::get_Now() - _t; g_nScan++;
+	return _r;
+}
+int3 FindNewlyPlacedBlockImpl(const string &in blockName, uint preLen, int3 fallback)
 {
 	auto allB = GetApp().RootMap.Blocks;
 	for (uint ak = preLen; ak < allB.Length; ak++) {
@@ -664,9 +744,11 @@ ConnectCacheEntry@ GetConnectCache(CGameEditorPluginMap@ map, CGameCtnBlock@ pre
 
     // Cache miss — call the engine.
     g_cacheMisses++;
+    uint64 _t = Time::get_Now();
     while (!map.IsEditorReadyForRequest) { yield(); }
     map.GetConnectResults(prevBlock, info);
     while (!map.IsEditorReadyForRequest) { yield(); }
+    g_tConnect += Time::get_Now() - _t; g_nConnect++;
 
     @entry = ConnectCacheEntry();
     for (uint r = 0; r < map.ConnectResults.Length; r++) {
@@ -725,9 +807,11 @@ CGameEditorPluginMap::ECardinalDirections DetectHeading(
 	for (uint p = 0; p < probes.Length; p++) {
 		auto probeInfo = map.GetBlockModelFromName(probes[p]);
 		if (probeInfo is null) continue;
+		uint64 _t = Time::get_Now();
 		while (!map.IsEditorReadyForRequest) { yield(); }
 		map.GetConnectResults(placedBlock, probeInfo);
 		while (!map.IsEditorReadyForRequest) { yield(); }
+		g_tConnect += Time::get_Now() - _t; g_nConnect++;
 		for (uint r = 0; r < map.ConnectResults.Length; r++) {
 			auto res = map.ConnectResults[r];
 			if (res is null || !res.CanPlace) continue;
@@ -783,20 +867,6 @@ int3 PlaceConnected(CGameEditorPluginMap@ map, int3 prevPos, const string &in bl
 	auto preferDir = g_travelDir;
 	auto backDir   = IntToDir((DirToInt(preferDir) + 2) % 4);
 	ConnectCacheEntry@ c = GetConnectCache(map, prevBlock, prevPos, blockName, info);
-
-	// TEMP DIAGNOSTIC: dump the (dir, coord) candidates the passes will consider.
-	// Only CanPlace=true results are cached, so this is exactly the list passes 1/2/3 walk.
-	// Remove once the g_travelDir desync is diagnosed.
-	{
-		string cand = "    [candidates] " + blockName + " from " + prevBlock.BlockModel.IdName
-			+ "  (prefer=" + DirStr(preferDir) + "  back=" + DirStr(backDir) + "):";
-		for (uint r = 0; r < c.dirs.Length; r++) {
-			int3 cc = int3(prevPos.x + c.offsets[r].x, prevPos.y + c.offsets[r].y, prevPos.z + c.offsets[r].z);
-			cand += "  " + DirStr(c.dirs[r]) + "@" + tostring(cc);
-		}
-		if (c.dirs.Length == 0) cand += " (none)";
-		TGprint(cand);
-	}
 
 	// Consume forced turn direction (set by caller for curve blocks).
 	int forceDirIdx = g_forceTurnDirIdx;
@@ -943,6 +1013,7 @@ int3 PlaceBorderlessAdjacent(CGameEditorPluginMap@ map, int3 prevPos, const stri
 		uint preLen = GetApp().RootMap.Blocks.Length;
 		if (PlaceBlock(map, blockName, d, coord)) {
 			g_travelDir = d;
+			g_nBorderless++;
 			TGprint("    borderless-adjacent: placed " + blockName + " @ " + tostring(coord) + "  dir=" + DirStr(d));
 			return FindNewlyPlacedBlock(blockName, preLen, coord);
 		}
@@ -999,32 +1070,103 @@ int3 PlaceReversedConnected(CGameEditorPluginMap@ map, int3 prevPos, const strin
 	return int3(-1, -1, -1);
 }
 
-// Place blockName with the direction OPPOSITE to travelDir at prevPos (y-1 or y=0).
-// Used for SlopeDown entry (SLOPE_END reversed) and exit (SLOPE_START reversed).
-// Updates g_travelDir to the reverse direction on success — slope body blocks then
-// connect correctly in the new physical travel direction.
-int3 PlaceReversed(CGameEditorPluginMap@ map, int3 prevPos, const string &in blockName)
+// Turn-aware reversed placement for down-slope CURVE bodies. PlaceReversedConnected only
+// accepts the straight-back result (dir == reverseDir), which works for a Slope2Straight but
+// rejects a sloped curve — the curve exits 90° to the side, so none of its results carry the
+// straight-back dir. Here the result's `dir` is still used as the block ROTATION (so it keeps
+// descending), but selection is by exit OFFSET: take any result that isn't travelling backward
+// toward the entry. The real heading is then derived from the placed block's geometry by
+// DetectHeading — we do NOT assume the new heading equals reverseDir.
+int3 PlaceReversedTurn(CGameEditorPluginMap@ map, int3 prevPos, const string &in blockName)
 {
-	auto reverseDir = IntToDir((DirToInt(g_travelDir) + 2) % 4);
-	TGprint("  PlaceReversed: " + blockName + "  prevPos=" + tostring(prevPos) + "  travelDir=" + DirStr(g_travelDir) + "  reverseDir=" + DirStr(reverseDir));
-	// Only vary Y: try y-1 (slope anchor sits one below flat level), then y=0.
-	// No horizontal offset — the block must connect directly to prevPos.
-	for (int yOff = -1; yOff <= 0; yOff++) {
-		int3 tryCoord = int3(prevPos.x, prevPos.y + yOff, prevPos.z);
-		while (!map.IsEditorReadyForRequest) { yield(); }
+	auto prevBlock = GetBlockAt(map, prevPos);
+	if (prevBlock is null) return int3(-1, -1, -1);
+	auto info = map.GetBlockModelFromName(blockName);
+	if (info is null) return int3(-1, -1, -1);
+
+	auto travelDir = g_travelDir;
+	int3 fwd = MoveDir(travelDir);
+	g_forceTurnDirIdx = -1;  // the flat-curve forced turn doesn't apply to slope bodies
+
+	ConnectCacheEntry@ c = GetConnectCache(map, prevBlock, prevPos, blockName, info);
+	for (uint r = 0; r < c.dirs.Length; r++) {
+		auto dir   = c.dirs[r];
+		int3 off   = c.offsets[r];
+		int3 coord = int3(prevPos.x + off.x, prevPos.y + off.y, prevPos.z + off.z);
+		// Reject results that travel backward toward the entry (would climb back up the slope).
+		if (off.x * fwd.x + off.z * fwd.z < 0) continue;
+		if (coord == g_startPos) continue;
+		if (OutOfStadiumBounds(coord)) continue;
 		uint preLen = GetApp().RootMap.Blocks.Length;
-		bool placed = PlaceBlock(map, blockName, reverseDir, tryCoord);
-		TGprint("    yOff=" + tostring(yOff) + "  tryCoord=" + tostring(tryCoord) + "  PlaceBlock=" + (placed ? "OK" : "FAILED"));
-		if (placed) {
-			g_travelDir = reverseDir;  // physical travel direction is now reversed
-			return FindNewlyPlacedBlock(blockName, preLen, tryCoord);
+		if (PlaceBlock(map, blockName, dir, coord)) {
+			int3 placed = FindNewlyPlacedBlock(blockName, preLen, coord);
+			g_travelDir = DetectHeading(map, placed, prevPos, blockName, travelDir);
+			TGprint("    PlaceReversedTurn: placed " + blockName + " @ " + tostring(placed)
+				+ "  rot=" + DirStr(dir) + "  heading=" + DirStr(g_travelDir));
+			return placed;
 		}
 	}
-	TGprint("  PlaceReversed: all attempts failed for " + blockName);
+	TGprint("  PlaceReversedTurn: no usable forward result for " + blockName);
 	return int3(-1, -1, -1);
 }
 
-// Like PlaceReversed but does NOT update g_travelDir.
+// S2S slope↔tilt switch placement. The dual Slope2Straight slopes along one axis and banks
+// along the perpendicular, so switching its role is a ~90° pivot: place the next block on a
+// SIDE socket (exit offset perpendicular to current travel) rather than straight ahead, which
+// is what inverted the slope into a \/ kink. Uses the engine's reported rotation for that
+// socket; DetectHeading sets the real new heading. preferSide biases which side to try first
+// (TiltNone = random). Returns (-1,-1,-1) if no side socket is placeable so the caller can
+// fall back to the normal straight-ahead placement.
+int3 PlaceSwitchSlopeTilt(CGameEditorPluginMap@ map, int3 prevPos, const string &in blockName, TiltSide preferSide)
+{
+	auto prevBlock = GetBlockAt(map, prevPos);
+	if (prevBlock is null) return int3(-1, -1, -1);
+	auto info = map.GetBlockModelFromName(blockName);
+	if (info is null) return int3(-1, -1, -1);
+
+	// The dual block keeps the SAME rotation as the block we pivot from — only the attach
+	// side (and hence travel heading) changes. So we accept only side sockets whose rotation
+	// matches the previous block's.
+	auto prevRot = GetBlockDirection(prevBlock);
+
+	int3 leftV  = MoveDir(TurnDirLeft(g_travelDir));
+	int3 rightV = MoveDir(TurnDirRight(g_travelDir));
+
+	// Order the two sides by preference.
+	array<int3> sideOrder;
+	if (preferSide == TiltSide::TiltRight)     { sideOrder.InsertLast(rightV); sideOrder.InsertLast(leftV); }
+	else if (preferSide == TiltSide::TiltLeft)  { sideOrder.InsertLast(leftV);  sideOrder.InsertLast(rightV); }
+	else if (MathRand(0, 1) == 0)               { sideOrder.InsertLast(leftV);  sideOrder.InsertLast(rightV); }
+	else                                        { sideOrder.InsertLast(rightV); sideOrder.InsertLast(leftV); }
+
+	ConnectCacheEntry@ c = GetConnectCache(map, prevBlock, prevPos, blockName, info);
+	for (uint s = 0; s < sideOrder.Length; s++) {
+		int3 want = sideOrder[s];
+		for (uint r = 0; r < c.dirs.Length; r++) {
+			if (c.dirs[r] != prevRot) continue;  // keep the previous block's rotation
+			int3 off = c.offsets[r];
+			// Require a positive component toward this side (a sideways/diagonal exit, not straight ahead/back).
+			if (off.x * want.x + off.z * want.z <= 0) continue;
+			int3 coord = int3(prevPos.x + off.x, prevPos.y + off.y, prevPos.z + off.z);
+			if (coord == g_startPos) continue;
+			if (OutOfStadiumBounds(coord)) continue;
+			uint preLen = GetApp().RootMap.Blocks.Length;
+			if (PlaceBlock(map, blockName, c.dirs[r], coord)) {
+				int3 placed = FindNewlyPlacedBlock(blockName, preLen, coord);
+				g_travelDir = DetectHeading(map, placed, prevPos, blockName, g_travelDir);
+				TGprint("    PlaceSwitchSlopeTilt: " + blockName + " @ " + tostring(placed)
+					+ "  side=" + ((want.x == leftV.x && want.z == leftV.z) ? "L" : "R")
+					+ "  rot=" + DirStr(c.dirs[r]) + "  heading=" + DirStr(g_travelDir));
+				return placed;
+			}
+		}
+	}
+	TGprint("  PlaceSwitchSlopeTilt: no side socket placeable for " + blockName);
+	return int3(-1, -1, -1);
+}
+
+// Place blockName rotated 180° from travelDir at prevPos (y-1 or y=0), WITHOUT
+// updating g_travelDir.
 // Used for tilt blocks: we only need the block physically rotated 180° to find
 // a snapping end — the road still continues in the same travel direction.
 int3 PlaceFlipped(CGameEditorPluginMap@ map, int3 prevPos, const string &in blockName)
@@ -1233,6 +1375,13 @@ void LogPlacementDiag(CGameEditorPluginMap@ map, int3 prevPos, const string &in 
 // once dropped from the tracking array, become orphans the final clear never touches.
 bool RemoveBlockRobust(CGameEditorPluginMap@ map, int3 coord, const array<int3>@ protect = null)
 {
+	uint64 _t = Time::get_Now();
+	bool _r = RemoveBlockRobustImpl(map, coord, protect);
+	g_tRemove += Time::get_Now() - _t; g_nRemove++;
+	return _r;
+}
+bool RemoveBlockRobustImpl(CGameEditorPluginMap@ map, int3 coord, const array<int3>@ protect = null)
+{
 	while (!map.IsEditorReadyForRequest) { yield(); }
 
 	// Step 1: engine spatial lookup at the exact coord.
@@ -1352,6 +1501,12 @@ void Run()
 	g_connectCache.DeleteAll();
 	g_cacheHits   = 0;
 	g_cacheMisses = 0;
+	g_tConnect = 0; g_nConnect = 0;
+	g_tPlace   = 0; g_nPlace   = 0;
+	g_tScan    = 0; g_nScan    = 0;
+	g_tRemove  = 0; g_nRemove  = 0;
+	g_nUndoTrans = 0; g_nFlatFb = 0; g_nBorderless = 0; g_nSlopeEsc = 0;
+	g_s2sSideAttach = false; g_s2sSidePref = TiltSide::TiltNone;
 
 	if (flatPool.Length == 0) {
 		TGprint("\\$f00V4: flat pool is empty, cannot generate.");
@@ -1474,8 +1629,7 @@ void Run()
 				// Use directional pool when already in slope, full pool otherwise
 				// (direction gets set by EnterSlope for new slope sections).
 				if (state == SurfaceState::Slope) {
-					bool up = slopeDir == SlopeDir::SlopeUp;
-					targetBlock = PickFiltered(up ? slopeUpPool : slopeDownPool, up ? slopeUpBasePool : slopeDownBasePool);
+					targetBlock = PickSlopeBody(slopeDir, stateRun);
 				} else {
 					targetBlock = PickFiltered(slopePool, slopeUpBasePool);
 				}
@@ -1552,8 +1706,7 @@ void Run()
 			}
 			if (state == SurfaceState::Slope && stateRun < MIN_SLOPE_RUN && targetState != SurfaceState::Slope) {
 				targetState = SurfaceState::Slope;
-				array<string>@ minPool = (slopeDir == SlopeDir::SlopeUp) ? slopeUpPool : slopeDownPool;
-				targetBlock = PickFromPool(minPool);
+				targetBlock = PickSlopeBody(slopeDir, stateRun);
 			}
 			if (state == SurfaceState::Tilt && stateRun < MIN_TILT_RUN && targetState != SurfaceState::Tilt) {
 				targetState = SurfaceState::Tilt;
@@ -1615,7 +1768,7 @@ void Run()
 					prevPos = p; placed++; placedCoords.InsertLast(p); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface); state = SurfaceState::Slope; stateRun = 0; flatRun = 0;
 					// Re-pick target from the now-known directional pool.
 					array<string>@ sp = (slopeDir == SlopeDir::SlopeUp) ? slopeUpPool : slopeDownPool;
-					if (sp.Length > 0) targetBlock = PickFromPool(sp);
+					if (sp.Length > 0) targetBlock = PickSlopeBody(slopeDir, 0);
 				}
 			}
 			else if (state == SurfaceState::Flat && targetState == SurfaceState::Tilt) {
@@ -1626,7 +1779,7 @@ void Run()
 					// Re-pick target from the now-known side pool so the first
 					// tilt body block is also side-consistent.
 					array<string>@ sp = (tiltSide == TiltSide::TiltLeft) ? tiltLeftPool : tiltRightPool;
-					if (sp.Length > 0) targetBlock = PickFromPool(sp);
+					if (sp.Length > 0) targetBlock = PickSlopeBody(slopeDir, 0);
 				}
 			}
 			else if (state == SurfaceState::Slope && targetState == SurfaceState::Flat) {
@@ -1675,7 +1828,9 @@ void Run()
 					TGprint("V4 trans: Slope->Tilt shortcut via Slope2Straight (no transition block)  tiltSide=" + (tiltSide == TiltSide::TiltLeft ? "L" : "R"));
 					state = SurfaceState::Tilt; stateRun = 0; flatRun = 0;
 					array<string>@ sp = (tiltSide == TiltSide::TiltLeft) ? tiltLeftPool : tiltRightPool;
-					if (sp.Length > 0) targetBlock = PickFromPool(sp);
+					if (sp.Length > 0) targetBlock = PickSlopeBody(slopeDir, 0);
+					// Switch is a ~90° pivot on the dual block — side-attach it (see PlaceSwitchSlopeTilt).
+					g_s2sSideAttach = true; g_s2sSidePref = tiltSide;
 				} else {
 					int3 p = ExitSlope(map, prevPos, slopeDir);
 					if (p.x < 0) { transOk = false; }
@@ -1710,7 +1865,9 @@ void Run()
 					TGprint("V4 trans: Tilt->Slope shortcut via Slope2Straight (no transition block)  slopeDir=" + (slopeDir == SlopeDir::SlopeUp ? "Up" : "Down"));
 					state = SurfaceState::Slope; stateRun = 0; flatRun = 0;
 					array<string>@ sp = (slopeDir == SlopeDir::SlopeUp) ? slopeUpPool : slopeDownPool;
-					if (sp.Length > 0) targetBlock = PickFromPool(sp);
+					if (sp.Length > 0) targetBlock = PickSlopeBody(slopeDir, 0);
+					// Switch is a ~90° pivot on the dual block — side-attach it (see PlaceSwitchSlopeTilt).
+					g_s2sSideAttach = true; g_s2sSidePref = TiltSide::TiltNone;
 				} else {
 					int3 p = ExitTilt(map, prevPos, tiltSide);
 					if (p.x < 0) { transOk = false; }
@@ -1721,7 +1878,7 @@ void Run()
 						else {
 							prevPos = p2; placed++; placedCoords.InsertLast(p2); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface); state = SurfaceState::Slope; stateRun = 0; flatRun = 0;
 							array<string>@ sp = (slopeDir == SlopeDir::SlopeUp) ? slopeUpPool : slopeDownPool;
-							if (sp.Length > 0) targetBlock = PickFromPool(sp);
+							if (sp.Length > 0) targetBlock = PickSlopeBody(slopeDir, 0);
 						}
 					}
 				}
@@ -1827,9 +1984,35 @@ void Run()
 
 			// Slope-down body blocks are placed with reverseDir sockets facing forward.
 			// PlaceConnected would grab their entry-side sockets (preferDir) instead.
-			int3 newPos = (phase == TrackPhase::PhaseSlopeDown)
-				? PlaceReversedConnected(map, prevPos, targetBlock)
-				: PlaceConnected(map, prevPos, targetBlock);
+			// A down-slope CURVE exits 90° to the side, which PlaceReversedConnected (straight-
+			// back only) rejects — those go through the turn-aware reversed placement instead.
+			int3 newPos = int3(-1, -1, -1);
+			bool placedBySide = false;
+			if (g_s2sSideAttach) {
+				// S2S slope↔tilt switch: pivot the dual block onto a side socket.
+				g_s2sSideAttach = false;
+				newPos = PlaceSwitchSlopeTilt(map, prevPos, targetBlock, g_s2sSidePref);
+				placedBySide = (newPos.x >= 0);
+				if (!placedBySide)
+					TGprint("V4: S2S side-attach found no side socket — falling back to straight placement");
+			}
+			if (!placedBySide) {
+				if (phase == TrackPhase::PhaseSlopeDown) {
+					newPos = (targetBlock.IndexOf("Curve") >= 0)
+						? PlaceReversedTurn(map, prevPos, targetBlock)
+						: PlaceReversedConnected(map, prevPos, targetBlock);
+				} else {
+					newPos = PlaceConnected(map, prevPos, targetBlock);
+				}
+			}
+			// Tilt→Slope S2S switch: up/down isn't known until the dual block is placed — read it
+			// from the pivot block's actual Y change (prevPos is still the pre-placement coord).
+			// Drives reversed (down) vs forward (up) for the following slope bodies.
+			if (placedBySide && state == SurfaceState::Slope && newPos.x >= 0) {
+				if      (newPos.y > prevPos.y) slopeDir = SlopeDir::SlopeUp;
+				else if (newPos.y < prevPos.y) slopeDir = SlopeDir::SlopeDown;
+				TGprint("    S2S Tilt→Slope: slopeDir from Y = " + (slopeDir == SlopeDir::SlopeUp ? "Up" : "Down"));
+			}
 			if (newPos.x < 0) {
 				TGprint("\\$f00V4: could not place " + targetBlock + " (block [" + tostring(placed + 1) + "]), trying fallbacks");
 				LogPlacementDiag(map, prevPos, targetBlock);
@@ -1843,6 +2026,7 @@ void Run()
 					prevPos     = (placedCoords.Length > 0) ? placedCoords[placedCoords.Length - 1] : startPos;
 					g_travelDir = (placedDirs.Length   > 0) ? placedDirs[placedDirs.Length - 1]     : initDir;
 					state = SurfaceState::Flat; tiltSide = TiltSide::TiltNone; stateRun = 0; flatRun = 0;
+					g_nUndoTrans++;
 					TGprint("V4: undid failed transition, placed [" + tostring(placed) + "]");
 					int3 fp = PlaceConnected(map, prevPos, PickFromPool(flatPool));
 					if (fp.x >= 0) {
@@ -1873,6 +2057,7 @@ void Run()
 				// Fallback 2: try a straight block first, then a random flat block.
 				{
 					string anyFlat = GetStraight();
+					g_nFlatFb++;
 					TGprint("V4: flat-fallback trying " + anyFlat + " from " + tostring(prevPos) + "  travelDir=" + DirStr(g_travelDir));
 					int3 flatPos = PlaceConnected(map, prevPos, anyFlat);
 					if (flatPos.x >= 0) {
@@ -1903,6 +2088,7 @@ void Run()
 				// Changes elevation to break out of crowded flat areas.
 				{
 					bool slopeEscaped = false;
+					g_nSlopeEsc++;
 					for (int popK = 1; popK <= 2 && !slopeEscaped && placedCoords.Length > 0; popK++) {
 						int3 popCoord = placedCoords[placedCoords.Length - 1];
 						string popName = "?";
@@ -1944,7 +2130,6 @@ void Run()
 						int3 p1 = PlaceReversedConnected(map, prevPos, escSlopeEnd);
 						if (p1.x < 0) { TGprint("  slope-escape: " + escSlopeEnd + " failed"); continue; }
 						TGprint("V4 [" + tostring(placed+1) + "] " + escSlopeEnd + " (escape-entry) @ " + tostring(p1) + "  dir=" + DirStr(g_travelDir));
-						auto afterSlopeEndDir = g_travelDir;
 
 						TGprint("  slope-escape: trying " + escSlopeStart + " (reversed) from " + tostring(p1) + "  travelDir=" + DirStr(g_travelDir));
 						int3 p2 = PlaceReversedConnected(map, p1, escSlopeStart);
@@ -1954,10 +2139,9 @@ void Run()
 							continue;
 						}
 						TGprint("V4 [" + tostring(placed+2) + "] " + escSlopeStart + " (escape-exit) @ " + tostring(p2) + "  dir=" + DirStr(g_travelDir));
-						// PlaceConnected updated g_travelDir to SLOPE_START's exit direction.
-						// Restore to afterSlopeEndDir — the actual physical direction the road travels.
-						g_travelDir = afterSlopeEndDir;
-						TGprint("  slope-escape: restored g_travelDir=" + DirStr(g_travelDir) + " (actual physical direction)");
+						// Both escape blocks descend via PlaceReversedConnected, which leaves g_travelDir
+						// untouched (the descent doesn't reverse physical travel), so g_travelDir already
+						// holds the correct heading here — no restore needed.
 
 						// Always use the straight — a level-drop escape needs a small block that
 						// fits wherever it lands; a random flat pick can roll a large curve that
@@ -2069,6 +2253,13 @@ void Run()
 		uint64 elapsed = Time::get_Now() - before;
 		TGprint("\\$0f0\\$sV4 done: " + tostring(placed) + " blocks in " + tostring(elapsed) + " ms"
 			+ "  cache hits=" + tostring(g_cacheHits) + " misses=" + tostring(g_cacheMisses));
+		TGprint("\\$0f0\\$sV4 timing: connect " + tostring(g_tConnect) + "ms/" + tostring(g_nConnect) + "x"
+			+ "  place " + tostring(g_tPlace) + "ms/" + tostring(g_nPlace) + "x"
+			+ "  scan " + tostring(g_tScan) + "ms/" + tostring(g_nScan) + "x"
+			+ "  remove " + tostring(g_tRemove) + "ms/" + tostring(g_nRemove) + "x");
+		TGprint("\\$0f0\\$sV4 fallbacks: undoTrans=" + tostring(g_nUndoTrans)
+			+ "  flatFb=" + tostring(g_nFlatFb) + "  borderless=" + tostring(g_nBorderless)
+			+ "  slopeEsc=" + tostring(g_nSlopeEsc));
 		UI::ShowNotification("V4 Track: " + tostring(placed) + " blocks");
 		lastRunCoords = placedCoords;
 		if (g_placedStartCoord.x >= 0) {
