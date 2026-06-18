@@ -256,6 +256,13 @@ CGameEditorPluginMap::ECardinalDirections g_travelDir;
 // -1 = no preference (normal behaviour). Consumed and reset inside PlaceConnected.
 int g_forceTurnDirIdx = -1;
 
+// Exit-state hint for DetectHeading on the next placement. Transition blocks don't reveal their
+// exit state by name (SlopeStart is exit=Slope when entering a slope, but exit=Flat when reused
+// reversed to leave a down-slope), so the transition helpers set this to the state the block
+// transitions INTO and DetectHeading probes that straight first. -1 = infer from block name
+// (the correct behaviour for body blocks). Holds a SurfaceState value (Flat/Slope/Tilt) otherwise.
+int g_probeExitState = -1;
+
 // S2S slope↔tilt switch: when set, the next body block is placed SIDE-attached (a ~90° pivot
 // on the dual Slope2Straight) instead of straight ahead — the slope and tilt roles are
 // perpendicular, so continuing straight inverts the slope and produces a \/ kink. Consumed at
@@ -838,19 +845,35 @@ CGameEditorPluginMap::ECardinalDirections DetectHeading(
 	auto placedBlock = GetBlockAt(map, placedPos);
 	if (placedBlock is null) return fallback;
 
-	// Order probes by the placed block's own type so the common case is a SINGLE
-	// GetConnectResults call (flat body → flat straight first, tilt body → tilt
-	// straight first, etc.). Transition blocks (Transition/SlopeStart/SlopeEnd) don't
-	// advertise their exit surface in the name, so the other straights are always kept
-	// as fallbacks and we take the first probe that actually mates the exit.
+	// Order probes so the first GetConnectResults call usually mates the exit (one call,
+	// fast). Three sources for the ordering, in priority:
+	//   1. g_probeExitState — an explicit exit-state hint set by a transition helper. A
+	//      transition block does NOT reveal its exit state by name (SlopeStart is exit=Slope
+	//      when entering a slope, but exit=Flat when reused reversed to leave a down-slope),
+	//      so the helper that placed it tells us the state it transitions INTO.
+	//   2. The placed block's own type, for body blocks (TiltStraight, SlopeStraight, …).
+	//   3. Flat-first fallback for anything else.
+	// Whatever leads, the other two straights stay as fallbacks so a miss still resolves.
+	// Road surfaces have dedicated Road*SlopeStraight / Road*TiltStraight blocks. Platform
+	// surfaces do NOT — their single dual straight, Slope2Straight, is both the slope and the
+	// tilt straight (slopes N↔S, banks E↔W). Probing a non-existent Platform*TiltStraight would
+	// resolve to null, be skipped, and silently fall back to the flat probe — which is exactly
+	// the heading-misdetection this hint is meant to fix. So on platform use Slope2Straight.
 	string flatStr  = GetStraight();
-	string tiltStr  = SURF_PREFIX[int(g_surface)] + "TiltStraight";
-	string slopeStr = SURF_PREFIX[int(g_surface)] + "SlopeStraight";
+	string s2s      = GetSlope2Straight();  // "" on road, Platform*Slope2Straight on platform
+	string tiltStr  = (s2s.Length > 0) ? s2s : SURF_PREFIX[int(g_surface)] + "TiltStraight";
+	string slopeStr = (s2s.Length > 0) ? s2s : SURF_PREFIX[int(g_surface)] + "SlopeStraight";
 	bool isTrans = blockName.IndexOf("Transition") >= 0
 	            || blockName.IndexOf("SlopeStart")  >= 0
 	            || blockName.IndexOf("SlopeEnd")    >= 0;
 	array<string> probes;
-	if (!isTrans && blockName.IndexOf("Tilt") >= 0) {
+	if (g_probeExitState == int(SurfaceState::Tilt)) {
+		probes.InsertLast(tiltStr); probes.InsertLast(flatStr); probes.InsertLast(slopeStr);
+	} else if (g_probeExitState == int(SurfaceState::Slope)) {
+		probes.InsertLast(slopeStr); probes.InsertLast(flatStr); probes.InsertLast(tiltStr);
+	} else if (g_probeExitState == int(SurfaceState::Flat)) {
+		probes.InsertLast(flatStr); probes.InsertLast(tiltStr); probes.InsertLast(slopeStr);
+	} else if (!isTrans && blockName.IndexOf("Tilt") >= 0) {
 		probes.InsertLast(tiltStr); probes.InsertLast(flatStr); probes.InsertLast(slopeStr);
 	} else if (!isTrans && blockName.IndexOf("Slope") >= 0) {
 		probes.InsertLast(slopeStr); probes.InsertLast(flatStr); probes.InsertLast(tiltStr);
@@ -1288,12 +1311,22 @@ int3 PlaceFlipped(CGameEditorPluginMap@ map, int3 prevPos, const string &in bloc
 	TGprint("  PlaceFlipped: all attempts failed for " + blockName);
 	return int3(-1, -1, -1);
 }
+// Uniform per-block log line. Every placed block — body, transition, surface-change —
+// prints "V4 [N] <block> @ <coord>  dir=<d>  (<note>)" at the same indentation so the
+// block number is always greppable; the note (transition kind, etc.) is secondary.
+void LogPlacedBlock(int blockNum, const string &in block, int3 pos, const string &in note)
+{
+	TGprint("V4 [" + tostring(blockNum) + "] " + block + " @ " + tostring(pos)
+		+ "  dir=" + DirStr(g_travelDir)
+		+ (note.Length > 0 ? "  (" + note + ")" : ""));
+}
+
 // ── Transition helpers ────────────────────────────────────────────────────────────────────
 // All helpers read/write g_travelDir so direction is tracked through transitions.
 
 // Ascending entry: SLOPE_START (flat→slope going up).
 // Descending entry: SLOPE_END reversed 180° (flat→slope going down). Falls back to ascending.
-int3 EnterSlope(CGameEditorPluginMap@ map, int3 prevPos, SlopeDir &out dir)
+int3 EnterSlope(CGameEditorPluginMap@ map, int3 prevPos, int blockNum, SlopeDir &out dir)
 {
 	string slopeEnd   = GetSlopeEnd();
 	// For Platform: 50/50 between Slope2Start and Slope2Start2.
@@ -1301,63 +1334,75 @@ int3 EnterSlope(CGameEditorPluginMap@ map, int3 prevPos, SlopeDir &out dir)
 	string s2 = GetSlopeStart2();
 	if (s2.Length > 0 && MathRand(0, 1) == 0) slopeStart = s2;
 	if (MathRand(0, 1) == 0) {
+		g_probeExitState = int(SurfaceState::Slope);
 		int3 newPos = PlaceReversedConnected(map, prevPos, slopeEnd);
+		g_probeExitState = -1;
 		if (newPos.x >= 0) {
 			dir = SlopeDir::SlopeDown;
-			TGprint("V4 trans: Flat→Slope/Down  " + slopeEnd + " @ " + tostring(newPos) + "  dir=" + DirStr(g_travelDir));
+			LogPlacedBlock(blockNum, slopeEnd, newPos, "trans Flat→Slope/Down");
 			return newPos;
 		}
 		TGprint("  → EnterSlope: " + slopeEnd + " (reversed) failed from " + tostring(prevPos) + "  travelDir=" + DirStr(g_travelDir) + ", trying SlopeUp");
 	}
 	dir = SlopeDir::SlopeUp;
+	g_probeExitState = int(SurfaceState::Slope);
 	int3 newPos = PlaceConnected(map, prevPos, slopeStart);
+	g_probeExitState = -1;
 	if (newPos.x < 0) {
 		TGprint("  → EnterSlope: " + slopeStart + " failed from " + tostring(prevPos) + "  travelDir=" + DirStr(g_travelDir));
 		return int3(-1, -1, -1);
 	}
-	TGprint("V4 trans: Flat→Slope/Up  " + slopeStart + " @ " + tostring(newPos) + "  dir=" + DirStr(g_travelDir));
+	LogPlacedBlock(blockNum, slopeStart, newPos, "trans Flat→Slope/Up");
 	return newPos;
 }
 
 // Exit slope → flat.
 // SlopeDown: slope body forward socket connects to SLOPE_START (exits at lower flat).
 // SlopeUp:   slope body forward socket connects to SLOPE_END (exits at upper flat).
-int3 ExitSlope(CGameEditorPluginMap@ map, int3 prevPos, SlopeDir dir)
+int3 ExitSlope(CGameEditorPluginMap@ map, int3 prevPos, int blockNum, SlopeDir dir)
 {
 	string slopeStart = GetSlopeStart();
 	string slopeEnd   = GetSlopeEnd();
 	if (dir == SlopeDir::SlopeDown) {
+		g_probeExitState = int(SurfaceState::Flat);
 		int3 newPos = PlaceReversedConnected(map, prevPos, slopeStart);
-		if (newPos.x >= 0) { TGprint("V4 trans: Slope/Down→Flat  " + slopeStart + " @ " + tostring(newPos) + "  dir=" + DirStr(g_travelDir)); return newPos; }
+		g_probeExitState = -1;
+		if (newPos.x >= 0) { LogPlacedBlock(blockNum, slopeStart, newPos, "trans Slope/Down→Flat"); return newPos; }
 		TGprint("  → ExitSlope: " + slopeStart + " failed from " + tostring(prevPos) + "  travelDir=" + DirStr(g_travelDir));
 		LogPlacementDiag(map, prevPos, slopeStart);
 		return int3(-1, -1, -1);
 	}
 	// SlopeUp
+	g_probeExitState = int(SurfaceState::Flat);
 	int3 newPos = PlaceConnected(map, prevPos, slopeEnd);
+	g_probeExitState = -1;
 	if (newPos.x < 0) {
 		TGprint("  → ExitSlope: " + slopeEnd + " failed from " + tostring(prevPos) + "  travelDir=" + DirStr(g_travelDir));
 		LogPlacementDiag(map, prevPos, slopeEnd);
 		return int3(-1, -1, -1);
 	}
-	TGprint("V4 trans: Slope/Up→Flat  " + slopeEnd + " @ " + tostring(newPos) + "  dir=" + DirStr(g_travelDir));
+	LogPlacedBlock(blockNum, slopeEnd, newPos, "trans Slope/Up→Flat");
 	return newPos;
 }
 
-int3 ExitTilt(CGameEditorPluginMap@ map, int3 prevPos, TiltSide side)
+int3 ExitTilt(CGameEditorPluginMap@ map, int3 prevPos, int blockNum, TiltSide side)
 {
 	string block1 = (side == TiltSide::TiltRight) ? GetTiltDownRight() : GetTiltDownLeft();
 	string block2 = (side == TiltSide::TiltRight) ? GetTiltDownLeft()  : GetTiltDownRight();
+	g_probeExitState = int(SurfaceState::Flat);
 	int3 newPos = PlaceConnected(map, prevPos, block1);
-	if (newPos.x >= 0) { TGprint("V4 trans: Tilt→Flat  " + block1 + " @ " + tostring(newPos) + "  dir=" + DirStr(g_travelDir)); return newPos; }
+	g_probeExitState = -1;
+	if (newPos.x >= 0) { LogPlacedBlock(blockNum, block1, newPos, "trans Tilt→Flat"); return newPos; }
 	TGprint("  → ExitTilt: " + block1 + " failed from " + tostring(prevPos) + "  travelDir=" + DirStr(g_travelDir) + ", trying " + block2);
+	g_probeExitState = int(SurfaceState::Flat);
 	newPos = PlaceConnected(map, prevPos, block2);
-	if (newPos.x >= 0) { TGprint("V4 trans: Tilt→Flat  " + block2 + " @ " + tostring(newPos) + "  dir=" + DirStr(g_travelDir)); return newPos; }
+	g_probeExitState = -1;
+	if (newPos.x >= 0) { LogPlacedBlock(blockNum, block2, newPos, "trans Tilt→Flat"); return newPos; }
 	TGprint("  → ExitTilt: " + block2 + " also failed from " + tostring(prevPos) + "  travelDir=" + DirStr(g_travelDir));
 	return int3(-1, -1, -1);
 }
 
-int3 EnterTilt(CGameEditorPluginMap@ map, int3 prevPos, TiltSide &out side)
+int3 EnterTilt(CGameEditorPluginMap@ map, int3 prevPos, int blockNum, TiltSide &out side)
 {
 	TiltSide firstSide = (MathRand(0, 1) == 0) ? TiltSide::TiltLeft : TiltSide::TiltRight;
 	for (int attempt = 0; attempt < 2; attempt++) {
@@ -1369,9 +1414,11 @@ int3 EnterTilt(CGameEditorPluginMap@ map, int3 prevPos, TiltSide &out side)
 		if (tiltS2.Length > 0 && block == GetSlopeStart() && MathRand(0, 1) == 0) block = tiltS2;
 
 		// Normal placement via connect results.
+		g_probeExitState = int(SurfaceState::Tilt);
 		int3 newPos = PlaceConnected(map, prevPos, block);
+		g_probeExitState = -1;
 		if (newPos.x >= 0) {
-			TGprint("V4 trans: Flat→Tilt  " + block + " (normal) @ " + tostring(newPos) + "  dir=" + DirStr(g_travelDir));
+			LogPlacedBlock(blockNum, block, newPos, "trans Flat→Tilt");
 			return newPos;
 		}
 		TGprint("  → EnterTilt: " + block + " (normal) failed from " + tostring(prevPos) + "  travelDir=" + DirStr(g_travelDir));
@@ -1379,31 +1426,89 @@ int3 EnterTilt(CGameEditorPluginMap@ map, int3 prevPos, TiltSide &out side)
 
 		// Flipped placement — rotates block 180°, g_travelDir unchanged.
 		// Tilt transitions go straight; flipping is purely to find a snapping face.
+		g_probeExitState = int(SurfaceState::Tilt);
 		newPos = PlaceFlipped(map, prevPos, block);
+		g_probeExitState = -1;
 		if (newPos.x >= 0) {
-			TGprint("V4 trans: Flat→Tilt  " + block + " (flipped) @ " + tostring(newPos) + "  dir=" + DirStr(g_travelDir));
+			LogPlacedBlock(blockNum, block, newPos, "trans Flat→Tilt (flipped)");
 			return newPos;
 		}
 		TGprint("  → EnterTilt: " + block + " (flipped) failed from " + tostring(prevPos) + "  travelDir=" + DirStr(g_travelDir));
 	}
 	return int3(-1, -1, -1);
 }
+
+// Places a straight Slope2Straight BODY block going forward in travelDir. The SOLID Slope2Straight
+// won't expose its banked/forward (northern) faces to GetConnectResults, but the geometrically
+// identical *Slope2StraightWithHole24m* variant does — so we probe with the hole block to discover
+// the forward connection, then place the SOLID block at that coord+dir.
+//   yCrit selects the height of the forward cell by current state:
+//     0  = level   (tilt body — same Y)
+//    >0  = ascends (slope-up body  — higher Y)
+//    <0  = descends(slope-down body — lower Y)
+// Returns the placed coord, or int3(-1,-1,-1) if no matching forward connection is offered
+// (caller falls back to a flat block forward).
+int3 PlaceSlope2StraightForwardHole(CGameEditorPluginMap@ map, int3 prevPos,
+                                    CGameEditorPluginMap::ECardinalDirections travelDir, int yCrit)
+{
+	string solid = GetSlope2Straight();           // "PlatformXSlope2Straight" (empty on road)
+	if (solid.Length == 0) return int3(-1, -1, -1);
+	string hole = solid + "WithHole24m";          // the variant whose hidden faces the engine enumerates
+	auto holeInfo  = map.GetBlockModelFromName(hole);
+	auto prevBlock = GetBlockAt(map, prevPos);
+	if (holeInfo is null || prevBlock is null) return int3(-1, -1, -1);
+
+	int3 step = MoveDir(travelDir);
+	int fwdX = prevPos.x + step.x;   // forward cell on the travel axis; Y is chosen by yCrit
+	int fwdZ = prevPos.z + step.z;
+
+	while (!map.IsEditorReadyForRequest) { yield(); }
+	map.GetConnectResults(prevBlock, holeInfo);
+	while (!map.IsEditorReadyForRequest) { yield(); }
+
+	for (uint r = 0; r < map.ConnectResults.Length; r++) {
+		auto res = map.ConnectResults[r];
+		if (res is null || !res.CanPlace) continue;
+		int3 c = res.Coord;
+		if (c.x != fwdX || c.z != fwdZ) continue;          // must be the forward (travel-axis) cell
+		if (yCrit == 0 && c.y != prevPos.y) continue;      // level
+		if (yCrit  > 0 && c.y <= prevPos.y) continue;      // must ascend
+		if (yCrit  < 0 && c.y >= prevPos.y) continue;      // must descend
+		auto dir = ConvertDir(res.Dir);
+		if (PlaceBlock(map, solid, dir, c)) {
+			g_travelDir = travelDir;   // went straight forward — heading preserved
+			TGprint("V4 S2S-fwd: " + solid + " @ " + tostring(c) + "  dir=" + DirStr(dir)
+				+ "  (WithHole probe, " + (yCrit == 0 ? "level" : (yCrit > 0 ? "up" : "down")) + ")");
+			return c;
+		}
+		TGprint("\\$f80V4 S2S-fwd: PlaceBlock failed @ " + tostring(c) + "  dir=" + DirStr(dir));
+		return int3(-1, -1, -1);
+	}
+	TGprint("\\$f80V4 S2S-fwd: no forward WithHole connection (fwd=<" + tostring(fwdX) + ", *, " + tostring(fwdZ)
+		+ ">, yCrit=" + tostring(yCrit) + ") — falling back");
+	return int3(-1, -1, -1);
+}
+
 // Switches tilt side via a TiltSwitch block (Road surfaces only).
 // Tries normal placement then flipped. Updates `side` and returns new pos on success,
 // or int3(-1,-1,-1) on failure (caller continues with same side).
-int3 SwitchTilt(CGameEditorPluginMap@ map, int3 prevPos, TiltSide curSide, TiltSide &out side)
+int3 SwitchTilt(CGameEditorPluginMap@ map, int3 prevPos, int blockNum, TiltSide curSide, TiltSide &out side)
 {
 	TiltSide newSide = (curSide == TiltSide::TiltLeft) ? TiltSide::TiltRight : TiltSide::TiltLeft;
 	string block = SURF_PREFIX[int(g_surface)] + (newSide == TiltSide::TiltRight ? "TiltSwitchRight" : "TiltSwitchLeft");
+	g_probeExitState = int(SurfaceState::Tilt);
 	int3 newPos = PlaceConnected(map, prevPos, block);
+	g_probeExitState = -1;
 	if (newPos.x >= 0) {
-		TGprint("V4 trans: TiltSwitch " + (curSide == TiltSide::TiltLeft ? "L→R" : "R→L") + "  " + block + " @ " + tostring(newPos) + "  dir=" + DirStr(g_travelDir));
+		LogPlacedBlock(blockNum, block, newPos, "trans TiltSwitch " + (curSide == TiltSide::TiltLeft ? "L→R" : "R→L"));
 		side = newSide;
 		return newPos;
 	}
+	g_probeExitState = int(SurfaceState::Tilt);
 	newPos = PlaceFlipped(map, prevPos, block);
+	g_probeExitState = -1;
 	if (newPos.x >= 0) {
-		TGprint("V4 trans: TiltSwitch(flip) " + (curSide == TiltSide::TiltLeft ? "L→R" : "R→L") + "  " + block + " @ " + tostring(newPos) + "  dir=" + DirStr(g_travelDir));
+		LogPlacedBlock(blockNum, block, newPos, "trans TiltSwitch " + (curSide == TiltSide::TiltLeft ? "L→R" : "R→L") + " (flipped)");
 		side = newSide;
 		return newPos;
 	}
@@ -1563,6 +1668,32 @@ void DebugRemoveAtCoord()
 		TGprint("DebugRemove: MISSED — nothing found at " + tostring(coord) + " or within ±6 scan");
 }
 
+// ── Manual single-block placement (Settings UI) ──────────────────────────────
+// Places the current "dest" block (g_checkDirProbeName) at an explicit coord + direction
+// entered in the Settings tab. Lets you drop the destination block at each CheckDir
+// candidate to inspect by eye how smooth/uneven the connection is.
+void PlaceDestAtCoord()
+{
+	auto app = cast<CTrackMania>(GetApp());
+	if (app is null) return;
+	auto editor = cast<CGameCtnEditorFree>(app.Editor);
+	if (editor is null) { TGprint("PlaceDest: editor not open"); return; }
+	auto map = cast<CGameEditorPluginMap>(editor.PluginMapType);
+	if (map is null) return;
+
+	string name = g_checkDirProbeName;
+	if (name.Length == 0) { TGprint("\\$f00PlaceDest: no destination block set — use 'Load as dest' first"); return; }
+	if (map.GetBlockModelFromName(name) is null) { TGprint("\\$f00PlaceDest: block model '" + name + "' not found"); return; }
+
+	int3 coord = int3(g_destX, g_destY, g_destZ);
+	auto dir = DirFromStr(g_destDirText);
+	TGprint("PlaceDest: placing '" + name + "' at " + tostring(coord) + "  dir=" + DirStr(dir));
+	if (PlaceBlock(map, name, dir, coord))
+		TGprint("\\$0f0PlaceDest: placed OK");
+	else
+		TGprint("\\$f00PlaceDest: PlaceBlock FAILED at " + tostring(coord) + "  dir=" + DirStr(dir));
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 // Returns the start block name to auto-place based on enabled surface settings.
@@ -1682,7 +1813,7 @@ void Run()
 			// in-place using a TiltSwitch block instead of exit→enter.
 			// Platform has no TiltSwitch blocks — exit+enter handles it instead.
 			if (state == SurfaceState::Tilt && IsRoadSurface(g_surface) && MathRand(0, 9) == 0) {
-				int3 p = SwitchTilt(map, prevPos, tiltSide, tiltSide);
+				int3 p = SwitchTilt(map, prevPos, placed + 1, tiltSide, tiltSide);
 				if (p.x >= 0) {
 					prevPos = p; placed++;
 					placedCoords.InsertLast(p); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface);
@@ -1882,28 +2013,35 @@ void Run()
 				// No transition needed
 			}
 			else if (state == SurfaceState::Flat && targetState == SurfaceState::Slope) {
-				int3 p = EnterSlope(map, prevPos, slopeDir);
+				auto entryDir = g_travelDir;   // heading before the transition; transitions go straight
+				int3 p = EnterSlope(map, prevPos, placed + 1, slopeDir);
 				if (p.x < 0) { transOk = false; }
 				else {
-					prevPos = p; placed++; placedCoords.InsertLast(p); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface); state = SurfaceState::Slope; stateRun = 0; flatRun = 0;
-					// Re-pick target from the now-known directional pool.
+					prevPos = p; placed++;
+					g_travelDir = entryDir;   // continue in the initial direction (don't trust the transition's detected heading)
+					placedCoords.InsertLast(p); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface); state = SurfaceState::Slope; stateRun = 0; flatRun = 0;
+					// Re-pick target from the now-known directional pool. Straight Slope2Straight
+					// bodies are placed forward in the place-target section via the WithHole probe.
 					array<string>@ sp = (slopeDir == SlopeDir::SlopeUp) ? slopeUpPool : slopeDownPool;
 					if (sp.Length > 0) targetBlock = PickSlopeBody(slopeDir, 0);
 				}
 			}
 			else if (state == SurfaceState::Flat && targetState == SurfaceState::Tilt) {
-				int3 p = EnterTilt(map, prevPos, tiltSide);
+				auto entryDir = g_travelDir;   // heading before the transition; transitions go straight
+				int3 p = EnterTilt(map, prevPos, placed + 1, tiltSide);
 				if (p.x < 0) { transOk = false; }
 				else {
-					prevPos = p; placed++; placedCoords.InsertLast(p); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface); state = SurfaceState::Tilt; stateRun = 0; flatRun = 0;
-					// Re-pick target from the now-known side pool so the first
-					// tilt body block is also side-consistent.
+					prevPos = p; placed++;
+					g_travelDir = entryDir;   // continue in the initial direction (don't trust the transition's detected heading)
+					placedCoords.InsertLast(p); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface); state = SurfaceState::Tilt; stateRun = 0; flatRun = 0;
+					// Re-pick target from the now-known side pool. The first tilt body (platform
+					// Slope2Straight) is placed forward in the place-target section via the WithHole probe.
 					array<string>@ sp = (tiltSide == TiltSide::TiltLeft) ? tiltLeftPool : tiltRightPool;
 					if (sp.Length > 0) targetBlock = PickSlopeBody(slopeDir, 0);
 				}
 			}
 			else if (state == SurfaceState::Slope && targetState == SurfaceState::Flat) {
-				int3 p = ExitSlope(map, prevPos, slopeDir);
+				int3 p = ExitSlope(map, prevPos, placed + 1, slopeDir);
 				if (p.x < 0) {
 					if (phase == TrackPhase::PhaseSlopeUp) {
 						// Transition block unavailable — pop last slope body block and
@@ -1952,18 +2090,18 @@ void Run()
 					// Switch is a ~90° pivot on the dual block — side-attach it (see PlaceSwitchSlopeTilt).
 					g_s2sSideAttach = true; g_s2sSidePref = tiltSide;
 				} else {
-					int3 p = ExitSlope(map, prevPos, slopeDir);
+					int3 p = ExitSlope(map, prevPos, placed + 1, slopeDir);
 					if (p.x < 0) { transOk = false; }
 					else {
 						prevPos = p; placed++; placedCoords.InsertLast(p); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface); state = SurfaceState::Flat;
-						int3 p2 = EnterTilt(map, prevPos, tiltSide);
+						int3 p2 = EnterTilt(map, prevPos, placed + 1, tiltSide);
 						if (p2.x < 0) { transOk = false; }
 						else { prevPos = p2; placed++; placedCoords.InsertLast(p2); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface); state = SurfaceState::Tilt; stateRun = 0; flatRun = 0; }
 					}
 				}
 			}
 			else if (state == SurfaceState::Tilt && targetState == SurfaceState::Flat) {
-				int3 p = ExitTilt(map, prevPos, tiltSide);
+				int3 p = ExitTilt(map, prevPos, placed + 1, tiltSide);
 				if (p.x < 0) { transOk = false; }
 				else { prevPos = p; placed++; placedCoords.InsertLast(p); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface); state = SurfaceState::Flat; stateRun = 0; flatRun = 0; tiltSide = TiltSide::TiltNone; }
 			}
@@ -1989,11 +2127,11 @@ void Run()
 					// Switch is a ~90° pivot on the dual block — side-attach it (see PlaceSwitchSlopeTilt).
 					g_s2sSideAttach = true; g_s2sSidePref = TiltSide::TiltNone;
 				} else {
-					int3 p = ExitTilt(map, prevPos, tiltSide);
+					int3 p = ExitTilt(map, prevPos, placed + 1, tiltSide);
 					if (p.x < 0) { transOk = false; }
 					else {
 						prevPos = p; placed++; placedCoords.InsertLast(p); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface); state = SurfaceState::Flat; tiltSide = TiltSide::TiltNone;
-						int3 p2 = EnterSlope(map, prevPos, slopeDir);
+						int3 p2 = EnterSlope(map, prevPos, placed + 1, slopeDir);
 						if (p2.x < 0) { transOk = false; }
 						else {
 							prevPos = p2; placed++; placedCoords.InsertLast(p2); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface); state = SurfaceState::Slope; stateRun = 0; flatRun = 0;
@@ -2049,7 +2187,7 @@ void Run()
 								TGprint("V4: surf-trans exit (" + exitName + ") failed — skipping target");
 								surfTransOk = false;
 							} else {
-								TGprint("V4 surf-trans: " + exitName + " @ " + tostring(tp) + "  " + SURF_PREFIX[int(g_surface)] + "→Tech");
+								LogPlacedBlock(placed + 1, exitName, tp, "surf-trans " + SURF_PREFIX[int(g_surface)] + "→Tech");
 								g_surface = Surface::SurfaceTech;
 								prevPos = tp; placed++; placedCoords.InsertLast(tp); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface);
 							}
@@ -2071,7 +2209,7 @@ void Run()
 								TGprint("V4: surf-trans enter (" + enterName + ") failed — skipping target");
 								surfTransOk = false;
 							} else {
-								TGprint("V4 surf-trans: " + enterName + " @ " + tostring(tp) + "  Tech→" + SURF_PREFIX[int(targetSurface)]);
+								LogPlacedBlock(placed + 1, enterName, tp, "surf-trans Tech→" + SURF_PREFIX[int(targetSurface)]);
 								g_surface = targetSurface;
 								prevPos = tp; placed++; placedCoords.InsertLast(tp); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface);
 							}
@@ -2110,15 +2248,27 @@ void Run()
 			bool placedBySide = false;
 				// Flat base ramps ascend by default; reverse ~half the time so they descend instead.
 				bool reverseRamp = (state == SurfaceState::Flat) && IsFlatRamp(targetBlock) && MathRand(0, 1) == 0;
+			bool placedBySwitch = false;
 			if (g_s2sSideAttach) {
 				// S2S slope↔tilt switch: pivot the dual block onto a side socket.
 				g_s2sSideAttach = false;
 				newPos = PlaceSwitchSlopeTilt(map, prevPos, targetBlock, g_s2sSidePref);
 				placedBySide = (newPos.x >= 0);
+				placedBySwitch = placedBySide;
 				if (!placedBySide)
 					TGprint("V4: S2S side-attach found no side socket — falling back to straight placement");
 			}
-			if (!placedBySide) {
+			// Straight dual Slope2Straight body: the solid block hides its forward/banked faces from
+			// GetConnectResults, so probe with the WithHole variant and place the solid block forward.
+			// On failure newPos stays <0 and we drop into the fallback chain (flat forward) below —
+			// never the stamp-matching PlaceConnected, which would skew it onto a banked side.
+			bool isDualStraight = (GetSlope2Straight().Length > 0 && targetBlock == GetSlope2Straight());
+			if (!placedBySide && isDualStraight) {
+				int yCrit = (state == SurfaceState::Slope) ? (slopeDir == SlopeDir::SlopeUp ? 1 : -1) : 0;
+				newPos = PlaceSlope2StraightForwardHole(map, prevPos, g_travelDir, yCrit);
+				placedBySide = (newPos.x >= 0);   // reuse flag to skip the normal placement pass
+			}
+			if (!placedBySide && !isDualStraight) {
 				if (phase == TrackPhase::PhaseSlopeDown) {
 					newPos = (targetBlock.IndexOf("Curve") >= 0)
 						? PlaceReversedTurn(map, prevPos, targetBlock)
@@ -2135,7 +2285,7 @@ void Run()
 			// Tilt→Slope S2S switch: up/down isn't known until the dual block is placed — read it
 			// from the pivot block's actual Y change (prevPos is still the pre-placement coord).
 			// Drives reversed (down) vs forward (up) for the following slope bodies.
-			if (placedBySide && state == SurfaceState::Slope && newPos.x >= 0) {
+			if (placedBySwitch && state == SurfaceState::Slope && newPos.x >= 0) {
 				if      (newPos.y > prevPos.y) slopeDir = SlopeDir::SlopeUp;
 				else if (newPos.y < prevPos.y) slopeDir = SlopeDir::SlopeDown;
 				TGprint("    S2S Tilt→Slope: slopeDir from Y = " + (slopeDir == SlopeDir::SlopeUp ? "Up" : "Down"));
@@ -2324,11 +2474,11 @@ void Run()
 		// ── Exit any active non-flat state before placing Finish ──────────
 
 		if (state == SurfaceState::Slope) {
-			int3 p = ExitSlope(map, prevPos, slopeDir);
+			int3 p = ExitSlope(map, prevPos, placed + 1, slopeDir);
 			if (p.x >= 0) { prevPos = p; placed++; placedCoords.InsertLast(p); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface); state = SurfaceState::Flat; }
 		}
 		if (state == SurfaceState::Tilt) {
-			int3 p = ExitTilt(map, prevPos, tiltSide);
+			int3 p = ExitTilt(map, prevPos, placed + 1, tiltSide);
 			if (p.x >= 0) { prevPos = p; placed++; placedCoords.InsertLast(p); placedDirs.InsertLast(g_travelDir); placedSurfaces.InsertLast(g_surface); state = SurfaceState::Flat; tiltSide = TiltSide::TiltNone; }
 		}
 
@@ -2502,7 +2652,7 @@ void CheckDirectionForBlocks()
 	if (b is null) { TGprint("CheckDir: no track block found on map."); return; }
 	int3 bCoord = int3(b.CoordX, b.CoordY, b.CoordZ);
 	string bName = b.BlockModel.IdName;
-	TGprint("CheckDir: source block = '" + bName + "'  anchor=" + tostring(bCoord));
+	TGprint("CheckDir: source block = '" + bName + "'  anchor=" + tostring(bCoord) + "  dir=" + DirStr(GetBlockDirection(b)));
 
 	string probeName = g_checkDirProbeName;
 	auto probeInfo = map.GetBlockModelFromName(probeName);
@@ -2527,6 +2677,67 @@ void CheckDirectionForBlocks()
 	if (total == 0) {
 		TGprint("  (no connection points — block may not support connections, or map has no valid snap)");
 	}
+}
+
+// Quick variant of CheckDirectionForBlocks: instead of just logging the candidates, actually
+// PLACE the dest block at every connection point the game reports as placeable. Lets you see
+// all candidate connections at once and eyeball which orientations join smoothly. Candidates
+// are snapshotted before any placement, since placing one block can change the source block's
+// connect results mid-loop.
+void PlaceAllConnections()
+{
+	auto app = cast<CTrackMania>(GetApp());
+	if (app is null) return;
+	auto editor = cast<CGameCtnEditorFree>(app.Editor);
+	if (editor is null) { UI::ShowNotification("Editor not open!"); return; }
+	auto map = cast<CGameEditorPluginMap>(editor.PluginMapType);
+	if (map is null) return;
+
+	auto allB = GetApp().RootMap.Blocks;
+	if (allB.Length == 0) { TGprint("PlaceConns: no blocks on map."); return; }
+
+	CGameCtnBlock@ b = null;
+	for (int i = int(allB.Length) - 1; i >= 0; i--) {
+		if (BlockKindFromIdName(allB[i].BlockModel.IdName) == "Track") {
+			@b = allB[i];
+			break;
+		}
+	}
+	if (b is null) { TGprint("PlaceConns: no track block found on map."); return; }
+	int3 bCoord = int3(b.CoordX, b.CoordY, b.CoordZ);
+	string bName = b.BlockModel.IdName;
+
+	string probeName = g_checkDirProbeName;
+	if (probeName.Length == 0) { TGprint("\\$f00PlaceConns: no destination block set — use 'Load as dest' first"); return; }
+	auto probeInfo = map.GetBlockModelFromName(probeName);
+	if (probeInfo is null) { TGprint("\\$f00PlaceConns: probe model '" + probeName + "' not found"); return; }
+
+	while (!map.IsEditorReadyForRequest) { yield(); }
+	map.GetConnectResults(b, probeInfo);
+	while (!map.IsEditorReadyForRequest) { yield(); }
+
+	// Snapshot placeable candidates before placing anything.
+	array<CGameEditorPluginMap::ECardinalDirections> dirs;
+	array<int3> coords;
+	for (uint r = 0; r < map.ConnectResults.Length; r++) {
+		auto res = map.ConnectResults[r];
+		if (res is null || !res.CanPlace) continue;
+		dirs.InsertLast(ConvertDir(res.Dir));
+		coords.InsertLast(res.Coord);
+	}
+
+	TGprint("PlaceConns: placing '" + probeName + "' at " + tostring(dirs.Length)
+		+ " placeable connection(s) from '" + bName + "' @ " + tostring(bCoord) + "  dir=" + DirStr(GetBlockDirection(b)));
+	int ok = 0;
+	for (uint i = 0; i < dirs.Length; i++) {
+		if (PlaceBlock(map, probeName, dirs[i], coords[i])) {
+			ok++;
+			TGprint("  placed @ " + tostring(coords[i]) + "  dir=" + DirStr(dirs[i]));
+		} else {
+			TGprint("\\$f80  FAILED @ " + tostring(coords[i]) + "  dir=" + DirStr(dirs[i]));
+		}
+	}
+	TGprint("\\$0f0PlaceConns: placed " + tostring(ok) + "/" + tostring(dirs.Length));
 }
 
 } // namespace v4

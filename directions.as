@@ -73,6 +73,17 @@ CGameEditorPluginMap::ECardinalDirections IntToDir(int i)
 	return CGameEditorPluginMap::ECardinalDirections::North;
 }
 
+// Parse a single-letter compass direction (N/E/S/W, case-insensitive) — mirrors DirStr().
+// Anything unrecognised falls back to North.
+CGameEditorPluginMap::ECardinalDirections DirFromStr(const string &in s)
+{
+	string u = s.Trim().ToUpper();
+	if (u == "E") return CGameEditorPluginMap::ECardinalDirections::East;
+	if (u == "S") return CGameEditorPluginMap::ECardinalDirections::South;
+	if (u == "W") return CGameEditorPluginMap::ECardinalDirections::West;
+	return CGameEditorPluginMap::ECardinalDirections::North;
+}
+
 CGameEditorPluginMap::ECardinalDirections ConvertDir(CGameEditorPluginMapConnectResults::ECardinalDirections dir)
 {
 	switch(dir)

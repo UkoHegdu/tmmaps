@@ -4,8 +4,11 @@ bool HAS_ADVANCED_EDITOR = false;
 bool display = false, preloaded = false;
 // Debug block removal tool state
 int g_dbgRemX = 0, g_dbgRemY = 0, g_dbgRemZ = 0;
+// Manual dest-block placement tool state (Settings tab). Read by v4::PlaceDestAtCoord.
+int g_destX = 0, g_destY = 0, g_destZ = 0;
+string g_destDirText = "N";
 bool tabTrack = true, tabScenery = false, tabSettings = false, tabDev = false;
-int st_maxBlocks = 200;
+int st_maxBlocks = 300;
 //--
 
 void RenderMenu()
@@ -95,26 +98,9 @@ void RenderTrackGenerator()
 		startnew(v4::ClearLastRun);
 	}
 
-	string destLabel = v4::g_checkDirProbeName.Length > 0 ? v4::g_checkDirProbeName : "(none)";
-	UI::TextDisabled("Dest: " + destLabel);
-	UI::SameLine();
-	if (UI::Button(Icons::Download + " Load as dest")) {
-		auto allB = GetApp().RootMap.Blocks;
-		for (int i = int(allB.Length) - 1; i >= 0; i--) {
-			if (BlockKindFromIdName(allB[i].BlockModel.IdName) == "Track") {
-				v4::g_checkDirProbeName = allB[i].BlockModel.IdName;
-				break;
-			}
-		}
-	}
-	UI::SameLine();
-	if (UI::Button(Icons::Search + " Check connections")) {
-		startnew(v4::CheckDirectionForBlocks);
-	}
-
 	UI::Separator();
 	UI::Markdown("**Block Count**");
-	st_maxBlocks = UI::SliderInt("\\$bbbblocks (excluding start and finish)", st_maxBlocks, 5, 200);
+	st_maxBlocks = UI::SliderInt("\\$bbbblocks (excluding start and finish)", st_maxBlocks, 5, 300);
 
 	UI::Separator();
 	st_stadiumMode = UI::Checkbox("Stadium Mode \\$bbb(48×48 arena — avoids walls, no Curve5)", st_stadiumMode);
@@ -302,6 +288,45 @@ void RenderSettings()
 		UI::EndCombo();
 	}
 	UI::TextDisabled("Match the map's environment so only valid blocks are used.");
+
+	UI::Separator();
+	UI::Markdown("**Block connection testing**");
+
+	string destLabel = v4::g_checkDirProbeName.Length > 0 ? v4::g_checkDirProbeName : "(none)";
+	UI::TextDisabled("Dest: " + destLabel);
+	if (UI::Button(Icons::Download + " Load as dest")) {
+		auto allB = GetApp().RootMap.Blocks;
+		for (int i = int(allB.Length) - 1; i >= 0; i--) {
+			if (BlockKindFromIdName(allB[i].BlockModel.IdName) == "Track") {
+				v4::g_checkDirProbeName = allB[i].BlockModel.IdName;
+				break;
+			}
+		}
+	}
+	UI::SameLine();
+	if (UI::Button(Icons::Search + " Check connections")) {
+		startnew(v4::CheckDirectionForBlocks);
+	}
+	UI::SameLine();
+	if (UI::Button(Icons::Search + " Place connections")) {
+		startnew(v4::PlaceAllConnections);
+	}
+	UI::TextDisabled("Check = log candidates; Place = drop the dest block at every placeable candidate at once.");
+
+	UI::Separator();
+	UI::TextDisabled("Place the dest block at an explicit coord + direction (e.g. to drop it on each CheckDir candidate and inspect the connection).");
+	UI::SetNextItemWidth(80); g_destX = UI::InputInt("X##dest", g_destX);
+	UI::SameLine();
+	UI::SetNextItemWidth(80); g_destY = UI::InputInt("Y##dest", g_destY);
+	UI::SameLine();
+	UI::SetNextItemWidth(80); g_destZ = UI::InputInt("Z##dest", g_destZ);
+	UI::SameLine();
+	UI::SetNextItemWidth(50); g_destDirText = UI::InputText("Dir##dest", g_destDirText);
+	UI::SameLine();
+	if (UI::Button(Icons::Download + " Place dest")) {
+		startnew(v4::PlaceDestAtCoord);
+	}
+	UI::TextDisabled("Dir = N / E / S / W (defaults to N if blank/invalid).");
 }
 
 void RenderSceneryGenerator()
