@@ -33,9 +33,8 @@ TrackPhase ComputePhase(SurfaceState s, SlopeDir sd, TiltSide ts)
 
 const int MAX_SLOPE_RUN = 8;
 const int MAX_TILT_RUN  = 12;
-const int MIN_FLAT_RUN  = 3;
-const int MIN_SLOPE_RUN = 3;
-const int MIN_TILT_RUN  = 3;
+// Minimum run lengths for Flat/Slope/Tilt are user-configurable via the
+// "Minimum state length" setting (st_minStateLen, declared in settings.as).
 const int MAX_ATTEMPTS  = 1;  // single attempt — clear and fail on hard failure
 const int SURF_SWITCH_CHANCE = 20; // percent chance per flat block to try a surface switch
 
@@ -49,8 +48,13 @@ const int STADIUM_WALL_MAX  = 45;
 // Keep block anchors at or above this so descending slopes (which reach one cell below their
 // anchor) stay clear of the ground. Bump to 11 if a descent still grazes the floor.
 const int STADIUM_FLOOR_MIN = 10;
+// Effective ceiling for anchors: the stadium roof is ~Y=39; a climbing slope rises a
+// couple of cells above its anchor and the engine refuses a block that would pierce the
+// roof (OutOfStadiumBounds has no ceiling term). Keep anchors below this and exit early.
+const int STADIUM_CEIL_MAX  = 38;
 const int STADIUM_EXIT_DIST = 10;  // exit slope/tilt when fewer than this blocks ahead
 const int STADIUM_TURN_DIST = 5;   // force a turn when fewer than this blocks ahead (flat)
+const int STADIUM_CEIL_DIST = 4;   // exit a slope-up to flat when within this many Y of the ceiling
 
 // ── Per-surface data tables (indexed by Surface enum value) ──────────────────
 // Add a new surface: extend each table, add a pool file, add settings + UI.
@@ -237,6 +241,13 @@ const int STADIUM_CURVE_KEEP_CHANCE = 25;
 // slope bodies: when a Slope2Curve is rolled, keep it only this % of the time, else re-roll
 // toward a straight — so slopes aren't curve-spammed once curves are enabled.
 const int SLOPE_CURVE_KEEP_CHANCE = 25;
+// Mid-slope hole-block down-weighting (platform). Slope2StraightWithHole24m is a valid slope
+// body but has a gap in the middle, so keep it only this % of the time — a rare hazard.
+const int SLOPE_HOLE_KEEP_CHANCE = 5;
+// Flat base-ramp down-weighting. SlopeBase/Slope2Base ascend (or descend, when reversed) every
+// time, so a flat pool full of them makes the track yo-yo. Keep a rolled ramp only this % of the
+// time (~1/3) so flat sections are mostly level. Applies in all modes.
+const int FLAT_RAMP_KEEP_CHANCE = 33;
 
 // Current forward travel direction — set at generation start, updated by PlaceConnected.
 CGameEditorPluginMap::ECardinalDirections g_travelDir;
@@ -599,20 +610,38 @@ string PickFiltered(const array<string>@ pool, const array<string>@ basePool)
 	return PickFromPool(basePool);
 }
 
-// Flat-section pick with stadium curve down-weighting. In stadium mode, if a curve is
-// rolled, keep it only STADIUM_CURVE_KEEP_CHANCE% of the time and otherwise re-roll
-// toward a non-curve flat block. Outside stadium mode it behaves like PickFiltered.
-// Forced wall-avoidance turns bypass this (they set targetBlock directly).
+// True for the ascending/descending flat base ramps (SlopeBase, Slope2Base). Distinct names —
+// "Slope2Base" does not contain "SlopeBase" — so both are checked explicitly.
+bool IsFlatRamp(const string &in name)
+{
+	return name.IndexOf("SlopeBase") >= 0 || name.IndexOf("Slope2Base") >= 0;
+}
+
+// Flat-section pick with down-weighting. Base ramps (SlopeBase/Slope2Base) are down-weighted to
+// ~FLAT_RAMP_KEEP_CHANCE% in all modes so the track isn't a constant yo-yo. In stadium mode,
+// curves are additionally down-weighted toward straights. Forced wall-avoidance turns bypass
+// this (they set targetBlock directly).
 string PickFlat()
 {
 	string pick = PickFiltered(flatPool, flatBasePool);
-	if (!st_stadiumMode || pick.IndexOf("Curve") < 0) return pick;
-	if (MathRand(0, 99) < STADIUM_CURVE_KEEP_CHANCE) return pick;
-	for (int attempt = 0; attempt < 5; attempt++) {
-		string p2 = PickFiltered(flatPool, flatBasePool);
-		if (p2.IndexOf("Curve") < 0) return p2;
+
+	// Down-weight base ramps toward non-ramp flat blocks (~1/3 kept).
+	if (IsFlatRamp(pick) && MathRand(0, 99) >= FLAT_RAMP_KEEP_CHANCE) {
+		for (int attempt = 0; attempt < 5; attempt++) {
+			string p2 = PickFiltered(flatPool, flatBasePool);
+			if (!IsFlatRamp(p2)) { pick = p2; break; }
+		}
 	}
-	return pick;  // pool is curve-heavy — accept what we rolled
+
+	// Stadium: down-weight curves toward straights.
+	if (st_stadiumMode && pick.IndexOf("Curve") >= 0 && MathRand(0, 99) >= STADIUM_CURVE_KEEP_CHANCE) {
+		for (int attempt = 0; attempt < 5; attempt++) {
+			string p2 = PickFiltered(flatPool, flatBasePool);
+			if (p2.IndexOf("Curve") < 0) { pick = p2; break; }
+		}
+	}
+
+	return pick;
 }
 
 // Like PickFiltered but additionally down-weights Curve blocks: keep a rolled curve only
@@ -620,13 +649,16 @@ string PickFlat()
 string PickSlopeWeighted(const array<string>@ pool, const array<string>@ basePool)
 {
 	string pick = PickFiltered(pool, basePool);
-	if (pick.IndexOf("Curve") < 0) return pick;
-	if (MathRand(0, 99) < SLOPE_CURVE_KEEP_CHANCE) return pick;
+	bool isCurve = pick.IndexOf("Curve") >= 0;
+	bool isHole  = pick.IndexOf("WithHole") >= 0;
+	if (!isCurve && !isHole) return pick;
+	int keep = isHole ? SLOPE_HOLE_KEEP_CHANCE : SLOPE_CURVE_KEEP_CHANCE;
+	if (MathRand(0, 99) < keep) return pick;
 	for (int attempt = 0; attempt < 5; attempt++) {
 		string p2 = PickFiltered(pool, basePool);
-		if (p2.IndexOf("Curve") < 0) return p2;
+		if (p2.IndexOf("Curve") < 0 && p2.IndexOf("WithHole") < 0) return p2;
 	}
-	return pick;  // pool is curve-heavy — accept what we rolled
+	return pick;  // pool offers nothing plainer — accept what we rolled
 }
 
 // Pick a slope-body block. The first body after the entry transition (stateRun == 0) must be
@@ -695,15 +727,36 @@ int3 FindNewlyPlacedBlock(const string &in blockName, uint preLen, int3 fallback
 int3 FindNewlyPlacedBlockImpl(const string &in blockName, uint preLen, int3 fallback)
 {
 	auto allB = GetApp().RootMap.Blocks;
+	// Primary: an exact name + requested-coord match anywhere in the array. This is robust to
+	// array mutation — a mid-placement wall removal shifts indices, breaking the append-order
+	// (preLen) assumption and causing us to latch onto the wrong block (or, when the game only
+	// auto-spawned scenery, return a phantom coord that resolves to a DecoWallBasePillar).
+	for (uint i = 0; i < allB.Length; i++) {
+		if (allB[i].BlockModel.IdName == blockName
+		    && int(allB[i].CoordX) == fallback.x
+		    && int(allB[i].CoordY) == fallback.y
+		    && int(allB[i].CoordZ) == fallback.z) {
+			@g_dbgLastHandle = allB[i];
+			g_dbgLastCoord   = fallback;
+			return fallback;
+		}
+	}
+	// Secondary: append-order scan for blocks whose stored anchor differs from the requested
+	// cell (large multi-cell blocks). Skip auto-spawned scenery so it is never mistaken for track.
 	for (uint ak = preLen; ak < allB.Length; ak++) {
-		if (allB[ak].BlockModel.IdName == blockName) {
+		string n = allB[ak].BlockModel.IdName;
+		if (n == "DecoWallBasePillar" || n == "TrackWallStraightPillar") continue;
+		if (n == blockName) {
 			@g_dbgLastHandle = allB[ak];
 			g_dbgLastCoord   = int3(allB[ak].CoordX, allB[ak].CoordY, allB[ak].CoordZ);
 			return g_dbgLastCoord;
 		}
 	}
+	// Not found — the named track block did not actually register (e.g. only auto-deco resolved
+	// in the cell). Signal failure rather than returning the phantom requested coord, so the
+	// caller falls back instead of building on scenery.
 	@g_dbgLastHandle = null;
-	return fallback;
+	return int3(-1, -1, -1);
 }
 
 // Dump every connect result the game returned for blockName from prevPos.
@@ -804,6 +857,7 @@ CGameEditorPluginMap::ECardinalDirections DetectHeading(
 	} else {
 		probes.InsertLast(flatStr); probes.InsertLast(tiltStr); probes.InsertLast(slopeStr);
 	}
+	string rotStr = DirStr(GetBlockDirection(placedBlock));
 	for (uint p = 0; p < probes.Length; p++) {
 		auto probeInfo = map.GetBlockModelFromName(probes[p]);
 		if (probeInfo is null) continue;
@@ -812,11 +866,18 @@ CGameEditorPluginMap::ECardinalDirections DetectHeading(
 		map.GetConnectResults(placedBlock, probeInfo);
 		while (!map.IsEditorReadyForRequest) { yield(); }
 		g_tConnect += Time::get_Now() - _t; g_nConnect++;
+		// Build a candidate list (for diagnostics) while picking the first decisive socket.
+		string cand = "";
+		bool decided = false;
+		CGameEditorPluginMap::ECardinalDirections head = fallback;
+		auto chosenDir = fallback; int3 chosenCoord = int3(0, 0, 0);
 		for (uint r = 0; r < map.ConnectResults.Length; r++) {
 			auto res = map.ConnectResults[r];
 			if (res is null || !res.CanPlace) continue;
 			auto dir = ConvertDir(res.Dir);
 			int3 c   = res.Coord;
+			cand += " [" + DirStr(dir) + "@" + tostring(c) + "]";
+			if (decided) continue;
 			// The probe is a STRAIGHT, so its orientation reliably gives the travel AXIS
 			// (N/S → Z, E/W → X) — but NOT the sign (a straight reports both rotations,
 			// and `dir` is orientation, not heading). Take the sign from the exit coord
@@ -824,15 +885,27 @@ CGameEditorPluginMap::ECardinalDirections DetectHeading(
 			bool zAxis = (dir == CGameEditorPluginMap::ECardinalDirections::North
 			           || dir == CGameEditorPluginMap::ECardinalDirections::South);
 			if (zAxis) {
-				if (c.z > prevPos.z) return CGameEditorPluginMap::ECardinalDirections::North;
-				if (c.z < prevPos.z) return CGameEditorPluginMap::ECardinalDirections::South;
+				if      (c.z > prevPos.z) { head = CGameEditorPluginMap::ECardinalDirections::North; decided = true; }
+				else if (c.z < prevPos.z) { head = CGameEditorPluginMap::ECardinalDirections::South; decided = true; }
 			} else {
-				if (c.x > prevPos.x) return CGameEditorPluginMap::ECardinalDirections::West;
-				if (c.x < prevPos.x) return CGameEditorPluginMap::ECardinalDirections::East;
+				if      (c.x > prevPos.x) { head = CGameEditorPluginMap::ECardinalDirections::West;  decided = true; }
+				else if (c.x < prevPos.x) { head = CGameEditorPluginMap::ECardinalDirections::East;  decided = true; }
 			}
 			// Axis difference is zero (ambiguous) — try the next result / probe.
+			if (decided) { chosenDir = dir; chosenCoord = c; }
+		}
+		if (decided) {
+			TGprint("    DetectHeading: " + blockName + " rot=" + rotStr
+				+ " placed=" + tostring(placedPos) + " prev=" + tostring(prevPos)
+				+ " probe=" + probes[p] + " sockets:" + cand
+				+ " → chose " + DirStr(chosenDir) + "@" + tostring(chosenCoord)
+				+ " heading=" + DirStr(head));
+			return head;
 		}
 	}
+	TGprint("    DetectHeading: " + blockName + " rot=" + rotStr
+		+ " placed=" + tostring(placedPos) + " prev=" + tostring(prevPos)
+		+ " — no decisive exit socket, fallback=" + DirStr(fallback));
 	return fallback;
 }
 
@@ -868,6 +941,28 @@ int3 PlaceConnected(CGameEditorPluginMap@ map, int3 prevPos, const string &in bl
 	auto backDir   = IntToDir((DirToInt(preferDir) + 2) % 4);
 	ConnectCacheEntry@ c = GetConnectCache(map, prevBlock, prevPos, blockName, info);
 
+	// Diagnostic: dump exactly what the placement passes will iterate — the cached
+	// CanPlace sockets (engine geometry) plus this position's occupancy/bounds, which
+	// the cache does NOT capture. Shows whether the forward (preferDir) socket is
+	// genuinely missing vs. present-but-blocked.
+	if (st_debug) {
+		string cl = "";
+		bool sawPrefer = false;
+		for (uint r = 0; r < c.dirs.Length; r++) {
+			int3 cc = int3(prevPos.x + c.offsets[r].x, prevPos.y + c.offsets[r].y, prevPos.z + c.offsets[r].z);
+			if (c.dirs[r] == preferDir) sawPrefer = true;
+			string flags = "";
+			if (cc == g_startPos)        flags += " START";
+			if (OutOfStadiumBounds(cc))  flags += " OOB";
+			if (!(GetBlockAt(map, cc) is null)) flags += " OCC";
+			cl += " [" + DirStr(c.dirs[r]) + "→" + tostring(cc) + (flags.Length > 0 ? flags : " free") + "]";
+		}
+		TGprint("    PlaceConnected candidates for " + blockName + " from "
+			+ prevBlock.BlockModel.IdName + " @ " + tostring(prevPos)
+			+ "  prefer=" + DirStr(preferDir) + (sawPrefer ? "" : " (NOT in candidates!)")
+			+ "  back=" + DirStr(backDir) + ":" + (c.dirs.Length > 0 ? cl : " <none>"));
+	}
+
 	// Consume forced turn direction (set by caller for curve blocks).
 	int forceDirIdx = g_forceTurnDirIdx;
 	g_forceTurnDirIdx = -1;
@@ -885,8 +980,12 @@ int3 PlaceConnected(CGameEditorPluginMap@ map, int3 prevPos, const string &in bl
 			// Heading from the block's actual exit geometry, not the orientation stamp `dir`.
 			// Falls back to `dir` if no usable exit is found.
 			g_travelDir = DetectHeading(map, placed, prevPos, blockName, dir);
+			TGprint("    PlaceConnected pass1 (prefer " + DirStr(preferDir) + "): placed " + blockName
+				+ " stampDir=" + DirStr(dir) + " @ " + tostring(placed) + " → heading=" + DirStr(g_travelDir));
 			return placed;
 		}
+		TGprint("    PlaceConnected pass1: preferDir " + DirStr(preferDir) + " socket @ "
+			+ tostring(coord) + " present but PlaceBlock FAILED (falling through to side/back passes)");
 	}
 
 	// Pass 1.5: if a forced exit direction is set (e.g. curve left/right), try it before
@@ -921,6 +1020,8 @@ int3 PlaceConnected(CGameEditorPluginMap@ map, int3 prevPos, const string &in bl
 			// Heading from the block's actual exit geometry, not the orientation stamp `dir`.
 			// Falls back to `dir` if no usable exit is found.
 			g_travelDir = DetectHeading(map, placed, prevPos, blockName, dir);
+			TGprint("    PlaceConnected pass2 (prefer " + DirStr(preferDir) + " unavailable; took non-back): placed "
+				+ blockName + " stampDir=" + DirStr(dir) + " @ " + tostring(placed) + " → heading=" + DirStr(g_travelDir));
 			return placed;
 		}
 	}
@@ -1577,7 +1678,7 @@ void Run()
 			SlopeDir s2sForcedSlopeDir = SlopeDir::SlopeUp;
 
 			// ── Road tilt switch ──────────────────────────────────────────
-			// After MIN_TILT_RUN, road surfaces occasionally switch tilt side
+			// Road surfaces occasionally switch tilt side
 			// in-place using a TiltSwitch block instead of exit→enter.
 			// Platform has no TiltSwitch blocks — exit+enter handles it instead.
 			if (state == SurfaceState::Tilt && IsRoadSurface(g_surface) && MathRand(0, 9) == 0) {
@@ -1700,15 +1801,21 @@ void Run()
 
 			// ── Enforce run limits ────────────────────────────────────────
 
-			if (state == SurfaceState::Flat && flatRun < MIN_FLAT_RUN && targetState != SurfaceState::Flat) {
+			if (state == SurfaceState::Flat && flatRun < st_minStateLen && targetState != SurfaceState::Flat) {
+				TGprint("V4 min-state: Flat run=" + tostring(flatRun) + " < " + tostring(st_minStateLen)
+					+ " — overriding target back to Flat (was wanting other state)");
 				targetState = SurfaceState::Flat;
 				targetBlock = PickFromPool(flatPool);
 			}
-			if (state == SurfaceState::Slope && stateRun < MIN_SLOPE_RUN && targetState != SurfaceState::Slope) {
+			if (state == SurfaceState::Slope && stateRun < st_minStateLen && targetState != SurfaceState::Slope) {
+				TGprint("V4 min-state: Slope run=" + tostring(stateRun) + " < " + tostring(st_minStateLen)
+					+ " — overriding target back to Slope/" + (slopeDir == SlopeDir::SlopeUp ? "Up" : "Down"));
 				targetState = SurfaceState::Slope;
 				targetBlock = PickSlopeBody(slopeDir, stateRun);
 			}
-			if (state == SurfaceState::Tilt && stateRun < MIN_TILT_RUN && targetState != SurfaceState::Tilt) {
+			if (state == SurfaceState::Tilt && stateRun < st_minStateLen && targetState != SurfaceState::Tilt) {
+				TGprint("V4 min-state: Tilt run=" + tostring(stateRun) + " < " + tostring(st_minStateLen)
+					+ " — overriding target back to Tilt/" + (tiltSide == TiltSide::TiltLeft ? "L" : "R"));
 				targetState = SurfaceState::Tilt;
 				array<string>@ minPool = (tiltSide == TiltSide::TiltLeft) ? tiltLeftPool : tiltRightPool;
 				targetBlock = PickFromPool(minPool);
@@ -1726,6 +1833,19 @@ void Run()
 			// ── Stadium wall avoidance ────────────────────
 
 			if (st_stadiumMode) {
+				// Ceiling avoidance: a slope-up climbing toward the roof gets refused by the
+				// engine at PlaceBlock time (no ceiling term in OutOfStadiumBounds), which
+				// silently drops to a side socket and turns the slope into a tilt. Pre-empt it:
+				// when a slope-up is within STADIUM_CEIL_DIST of the ceiling, exit to flat.
+				if (state == SurfaceState::Slope && slopeDir == SlopeDir::SlopeUp) {
+					int roomAbove = STADIUM_CEIL_MAX - prevPos.y;
+					if (roomAbove < STADIUM_CEIL_DIST) {
+						targetState = SurfaceState::Flat;
+						targetBlock = PickFromPool(flatPool);
+						TGprint("Stadium: ceiling in " + tostring(roomAbove) + " (Slope/Up) -> forcing Flat exit");
+					}
+				}
+
 				int distAhead = StadiumDistAhead(prevPos, g_travelDir);
 				if (distAhead < STADIUM_EXIT_DIST && state != SurfaceState::Flat) {
 					// Approaching wall in a slope/tilt: exit to flat before turning.
@@ -1988,6 +2108,8 @@ void Run()
 			// back only) rejects — those go through the turn-aware reversed placement instead.
 			int3 newPos = int3(-1, -1, -1);
 			bool placedBySide = false;
+				// Flat base ramps ascend by default; reverse ~half the time so they descend instead.
+				bool reverseRamp = (state == SurfaceState::Flat) && IsFlatRamp(targetBlock) && MathRand(0, 1) == 0;
 			if (g_s2sSideAttach) {
 				// S2S slope↔tilt switch: pivot the dual block onto a side socket.
 				g_s2sSideAttach = false;
@@ -2002,7 +2124,12 @@ void Run()
 						? PlaceReversedTurn(map, prevPos, targetBlock)
 						: PlaceReversedConnected(map, prevPos, targetBlock);
 				} else {
-					newPos = PlaceConnected(map, prevPos, targetBlock);
+					if (reverseRamp) {
+						newPos = PlaceReversedConnected(map, prevPos, targetBlock);  // descend the ramp
+						if (newPos.x < 0) newPos = PlaceConnected(map, prevPos, targetBlock);  // else climb
+					} else {
+						newPos = PlaceConnected(map, prevPos, targetBlock);
+					}
 				}
 			}
 			// Tilt→Slope S2S switch: up/down isn't known until the dual block is placed — read it
