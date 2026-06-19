@@ -390,7 +390,7 @@ void LoadPools()
 
 			if (section == "FLAT") {
 				flatPool.InsertLast(line);
-			} else if (section == "SLOPE" && line.IndexOf("Special") < 0) {
+			} else if (section == "SLOPE" && st_v4Slope && line.IndexOf("Special") < 0) {
 				// Special blocks (turbo, no-engine, …) are flat-only — the slope/tilt
 				// variants are buggy, so they never enter the slope/tilt pools.
 				slopePool.InsertLast(line);
@@ -399,7 +399,7 @@ void LoadPools()
 				// Neutral blocks (no SlopeDown/SlopeUp suffix) go into both pools.
 				if (!isDown) slopeUpPool.InsertLast(line);
 				if (!isUp)   slopeDownPool.InsertLast(line);
-			} else if (section == "TILT" && !IsTiltDirectedCurve(line) && line.IndexOf("Special") < 0) {
+			} else if (section == "TILT" && st_v4Tilt && !IsTiltDirectedCurve(line) && line.IndexOf("Special") < 0) {
 				tiltPool.InsertLast(line);
 			}
 		}

@@ -1128,3 +1128,275 @@ void DiagBlockConnectionCheck()
 	TGprint("\\$0f0\\$s=== Diag Check Complete — saved to block_data/diag_connections.txt ===");
 	UI::ShowNotification("Diag check done! Results in block_data/diag_connections.txt");
 }
+
+// Try to place blockName connected to the block at prevPos. Asks the editor for every
+// connection result and places at the first one that reports CanPlace, in whatever
+// direction the connection dictates (snake-chain). Returns the anchor coord of the
+// newly placed block, or (-1,-1,-1) if nothing connected.
+int3 TryPlaceConnected(CGameEditorPluginMap@ map, int3 prevPos, const string &in name)
+{
+	auto prevBlock = map.GetBlock(prevPos);
+	if (prevBlock is null) return int3(-1, -1, -1);
+	auto info = map.GetBlockModelFromName(name);
+	if (info is null) return int3(-1, -1, -1);
+
+	while (!map.IsEditorReadyForRequest) { yield(); }
+	map.GetConnectResults(prevBlock, info);
+	while (!map.IsEditorReadyForRequest) { yield(); }
+
+	for (uint r = 0; r < map.ConnectResults.Length; r++) {
+		auto res = map.ConnectResults[r];
+		if (res is null || !res.CanPlace) continue;
+		auto dir = ConvertDir(res.Dir);
+		int3 coord = res.Coord;
+		uint preLen = GetApp().RootMap.Blocks.Length;
+		if (PlaceBlock(map, name, dir, coord)) {
+			return v4::FindNewlyPlacedBlock(name, preLen, coord);
+		}
+	}
+	return int3(-1, -1, -1);
+}
+
+// Known drivable surfaces, in the order the queue groups them (primary sort key). Anything
+// not starting with one of these (Snow, Rally, Castle, Deco, theme-transition blocks, etc.)
+// is ignored by the "place blocks" tools. Reorder this list to reorder the surface groups.
+const array<string> PAB_SURFACES = {
+	"PlatformTech", "PlatformDirt", "PlatformIce", "PlatformGrass", "PlatformPlastic", "PlatformWater",
+	"RoadTech", "RoadDirt", "RoadBump", "RoadIce", "RoadWater"
+};
+
+bool StartsWithStr(const string &in s, const string &in prefix)
+{
+	if (s.Length < prefix.Length) return false;
+	return s.SubStr(0, int(prefix.Length)) == prefix;
+}
+
+// Index of the surface this block belongs to (its group), or -1 if it isn't a Road/Platform block.
+int SurfaceRank(const string &in name)
+{
+	for (uint i = 0; i < PAB_SURFACES.Length; i++) {
+		if (StartsWithStr(name, PAB_SURFACES[i])) return int(i);
+	}
+	return -1;
+}
+
+// Category order WITHIN a surface (secondary sort key):
+//   0 base, 1 straight, 2 curve, 3 slope, 4 tilt, 5 loop, 6 checkpoint, 7 special, 8 other.
+// Wall/Sponsor/Diag structural variants are forced to the end (8) so the main run of
+// base/curve/slope blocks leads. Checked most-specific first so e.g. a "Slope2Curve" or
+// "SlopeBase" lands in slope, not curve/base, and "WallCurve" lands in other, not curve.
+int CategoryRank(const string &in name)
+{
+	if (name.IndexOf("Wall")       >= 0) return 8;
+	if (name.IndexOf("Sponsor")    >= 0) return 8;
+	if (name.IndexOf("Diag")       >= 0) return 8;
+	if (name.IndexOf("Checkpoint") >= 0) return 6;
+	if (name.IndexOf("Special")    >= 0) return 7;
+	if (name.IndexOf("Loop")       >= 0) return 5;
+	if (name.IndexOf("Tilt")       >= 0) return 4;
+	if (name.IndexOf("Slope")      >= 0) return 3;
+	if (name.IndexOf("Curve")      >= 0) return 2;
+	if (name.IndexOf("Base")       >= 0) return 0;
+	if (name.IndexOf("Straight")   >= 0) return 1;
+	return 8;
+}
+
+// True only for a genuine race-start block: IdName is exactly "<surface>Start"
+// (e.g. RoadTechStart, PlatformTechStart). Excludes Slope2Start, LoopStart, Diag*Start*, etc.
+bool IsRaceStartBlock(const string &in name)
+{
+	for (uint i = 0; i < PAB_SURFACES.Length; i++) {
+		if (name == PAB_SURFACES[i] + "Start") return true;
+	}
+	return false;
+}
+
+// ── Shared state for the "Place blocks" tools ─────────────────────────────────────
+// Used by both the full run (PlaceBlocksImpl) and the 10-at-a-time batch (PlaceNext10),
+// so the ordering and grid progression are identical. State persists between batch
+// presses; PabBuildQueue() resets it.
+array<string> g_pabQueue;        // ordered names still to place (index 0..)
+uint g_pabIndex = 0;             // next item in g_pabQueue
+int g_pabCol = 0, g_pabRow = 0, g_pabLevel = 0, g_pabCols = 1, g_pabRows = 1;
+bool g_pabHasLast = false;
+int3 g_pabLastPos;
+int g_pabConnected = 0, g_pabGrid = 0, g_pabSkipped = 0, g_pabPlaced = 0;
+
+// Build the ordered placement queue and reset all progress/grid state.
+//   - platformOnly: only blocks whose IdName contains "Platform".
+//   - Multilap blocks are excluded entirely (they act as start AND finish).
+//   - Only the first race-start block is kept, and it is placed first.
+//   - Finish blocks are placed last.
+void PabBuildQueue(CGameEditorPluginMap@ map, bool platformOnly)
+{
+	bool startKept = false;
+	array<string> middle;
+	array<string> finishBlocks;
+	for (uint i = 0; i < map.BlockModels.Length; i++) {
+		auto model = map.BlockModels[i];
+		if (model is null) continue;
+		string name = tostring(model.IdName);
+		if (SurfaceRank(name) < 0) continue;                     // ignore non Road/Platform (deco, snow, rally, …)
+		if (platformOnly && name.IndexOf("Platform") < 0) continue;
+		if (name.IndexOf("ToTheme") >= 0) continue;              // theme-transition blocks (other environments)
+		if (name.ToLower().IndexOf("multilap") >= 0) continue;   // start+finish in one — skip
+		if (IsRaceStartBlock(name)) {
+			if (startKept) continue;                              // only one start total — drop the rest
+			startKept = true;                                     // keep the first; it sorts in normally (category "other")
+		}
+		if (name.IndexOf("Finish") >= 0) { finishBlocks.InsertLast(name); continue; }
+		middle.InsertLast(name);
+	}
+
+	// Stable sort `middle` by (surface, category) using buckets — keeps engine order within a bucket.
+	array<string> sortedMiddle;
+	for (uint s = 0; s < PAB_SURFACES.Length; s++) {
+		for (int c = 0; c <= 8; c++) {
+			for (uint i = 0; i < middle.Length; i++) {
+				if (SurfaceRank(middle[i]) == int(s) && CategoryRank(middle[i]) == c) {
+					sortedMiddle.InsertLast(middle[i]);
+				}
+			}
+		}
+	}
+
+	g_pabQueue.Resize(0);
+	for (uint i = 0; i < sortedMiddle.Length; i++) g_pabQueue.InsertLast(sortedMiddle[i]);
+	for (uint i = 0; i < finishBlocks.Length; i++) g_pabQueue.InsertLast(finishBlocks[i]);
+
+	g_pabIndex = 0;
+	g_pabConnected = 0; g_pabGrid = 0; g_pabSkipped = 0; g_pabPlaced = 0;
+	g_pabHasLast = false;
+
+	int spacing = 4, margin = 4;
+	g_pabCols = Math::Max(1, (MAX_X - 2 * margin) / spacing);
+	g_pabRows = Math::Max(1, (MAX_Z - 2 * margin) / spacing);
+	g_pabCol = 0; g_pabRow = 0;
+	// Ground-up starts at ~MAX_Y/4 (a build height proven to work; Y=1 is underground and
+	// every placement fails there). Top-down starts just under the ceiling.
+	g_pabLevel = st_placeFromTop ? (MAX_Y - 2) : Math::Max(1, MAX_Y / 4);
+
+	TGprint("\\$0f0\\$sQueue built: " + (platformOnly ? "platform" : "all") + " — "
+		+ tostring(g_pabQueue.Length) + " blocks ("
+		+ (startKept ? "1 start" : "no start") + ", "
+		+ tostring(finishBlocks.Length) + " finish, " + (st_placeFromTop ? "top-down" : "ground-up") + ")");
+}
+
+// Place the single block at g_pabIndex (snake-connect, else grid) and advance the index.
+void PabPlaceOne(CGameEditorPluginMap@ map)
+{
+	if (g_pabIndex >= g_pabQueue.Length) return;
+	string name = g_pabQueue[g_pabIndex];
+	int spacing = 4, margin = 4;
+	int3 placedAt = int3(-1, -1, -1);
+	string how = "skip";
+
+	// 1) Snake: try to connect to the block we just placed.
+	if (g_pabHasLast) {
+		placedAt = TryPlaceConnected(map, g_pabLastPos, name);
+		if (placedAt.x >= 0) { g_pabConnected++; how = "connected"; }
+	}
+
+	// 2) Fallback: drop it at the next free grid cell.
+	if (placedAt.x < 0) {
+		int3 pos = int3(margin + g_pabCol * spacing, g_pabLevel, margin + g_pabRow * spacing);
+		uint preLen = GetApp().RootMap.Blocks.Length;
+		if (PlaceBlock(map, name, DIR_NORTH, pos)) {
+			placedAt = v4::FindNewlyPlacedBlock(name, preLen, pos);
+			g_pabGrid++; how = "grid";
+		} else {
+			g_pabSkipped++;
+		}
+		// Advance the cursor whether or not the block fit, so we reserve the slot.
+		g_pabCol++;
+		if (g_pabCol >= g_pabCols) { g_pabCol = 0; g_pabRow++; }
+		if (g_pabRow >= g_pabRows) {
+			g_pabRow = 0;
+			if (st_placeFromTop) { g_pabLevel -= 2; if (g_pabLevel < 1) g_pabLevel = 1; }
+			else { g_pabLevel += 2; if (g_pabLevel > MAX_Y - 2) g_pabLevel = MAX_Y - 2; }
+		}
+	}
+
+	if (placedAt.x >= 0) { g_pabLastPos = placedAt; g_pabHasLast = true; g_pabPlaced++; }
+
+	TGprint("\\$s[" + tostring(g_pabIndex) + "] " + name + " — " + how + " @ " + tostring(placedAt));
+	g_pabIndex++;
+}
+
+// Entry points wired to the Dev-tab buttons. The map is NOT cleared — these place into
+// the current map (intended for an empty map), so existing content is left untouched.
+void PlaceAllBlocks()         { PlaceBlocksImpl(false); }  // every Track block
+void PlaceAllPlatformBlocks() { PlaceBlocksImpl(true);  }  // only blocks named "...Platform..."
+
+// Dev tool: place blocks one by one into the current map (no clearing).
+// Each block first tries to connect to the previously placed block (snake-chain); if it
+// can't connect it is dropped at the next free grid cell instead. The grid fills a row,
+// then the next row, and when the whole X/Z plane is used it steps to a fresh plane two
+// levels away — upward from the ground by default, or downward from the top when
+// st_placeFromTop is set. Exactly one start block is placed (first), finish blocks last,
+// and multilap blocks are skipped. platformOnly limits it to "...Platform..." blocks.
+void PlaceBlocksImpl(bool platformOnly)
+{
+	auto app = cast<CTrackMania>(GetApp());
+	if (app is null) { UI::ShowNotification("App not available!"); return; }
+
+	auto editor = cast<CGameCtnEditorFree>(app.Editor);
+	if (editor is null) { UI::ShowNotification("Editor is not opened!"); return; }
+
+	auto map = cast<CGameEditorPluginMap>(editor.PluginMapType);
+	if (map is null) { UI::ShowNotification("Map not available!"); return; }
+
+	LoadMapSize();
+	PabBuildQueue(map, platformOnly);
+	int total = int(g_pabQueue.Length);
+
+	while (g_pabIndex < g_pabQueue.Length) {
+		PabPlaceOne(map);
+		while (!map.IsEditorReadyForRequest) { yield(); }
+	}
+
+	TGprint("\\$0f0\\$sPlace " + (platformOnly ? "platform" : "all") + " blocks done: placed "
+		+ tostring(g_pabPlaced) + " (connected " + tostring(g_pabConnected) + ", grid "
+		+ tostring(g_pabGrid) + "), skipped " + tostring(g_pabSkipped));
+	UI::ShowNotification("Placed " + tostring(g_pabPlaced) + "/" + tostring(total)
+		+ " blocks (connected " + tostring(g_pabConnected) + ", grid " + tostring(g_pabGrid) + ").");
+}
+
+// Dev tool: place the next 10 blocks of the all-Track queue, one batch per press, so the
+// ordering can be inspected step by step. Starts a fresh batch when none is active (or the
+// previous one finished). Use ResetPlaceBatch() to restart from the beginning mid-run.
+void PlaceNext10()
+{
+	auto app = cast<CTrackMania>(GetApp());
+	if (app is null) { UI::ShowNotification("App not available!"); return; }
+
+	auto editor = cast<CGameCtnEditorFree>(app.Editor);
+	if (editor is null) { UI::ShowNotification("Editor is not opened!"); return; }
+
+	auto map = cast<CGameEditorPluginMap>(editor.PluginMapType);
+	if (map is null) { UI::ShowNotification("Map not available!"); return; }
+
+	if (g_pabQueue.Length == 0 || g_pabIndex >= g_pabQueue.Length) {
+		LoadMapSize();
+		PabBuildQueue(map, true);   // platform-only for now
+	}
+
+	int start = int(g_pabIndex);
+	int target = Math::Min(int(g_pabQueue.Length), start + 10);
+	for (int k = start; k < target; k++) {
+		PabPlaceOne(map);
+		while (!map.IsEditorReadyForRequest) { yield(); }
+	}
+
+	bool done = g_pabIndex >= g_pabQueue.Length;
+	UI::ShowNotification("Placed blocks " + tostring(start + 1) + "–" + tostring(g_pabIndex)
+		+ " of " + tostring(g_pabQueue.Length) + (done ? " (batch complete)" : ""));
+}
+
+// Clears batch progress so the next "Place next 10" rebuilds from the start.
+// Does NOT remove already-placed blocks.
+void ResetPlaceBatch()
+{
+	g_pabQueue.Resize(0);
+	g_pabIndex = 0;
+}

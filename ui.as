@@ -256,6 +256,33 @@ void RenderDev()
 	UI::TextDisabled("Progress every 500 blocks. Output: connectivity_<vista>.txt (overwrites)");
 
 	UI::Separator();
+	UI::Markdown("**Place every block (no clear — use an empty map)**");
+	if (UI::Button(Icons::Th + " Place all blocks")) {
+		startnew(PlaceAllBlocks);
+	}
+	UI::SameLine();
+	if (UI::Button(Icons::Th + " Place platform blocks")) {
+		startnew(PlaceAllPlatformBlocks);
+	}
+	UI::SameLine();
+	st_placeFromTop = UI::Checkbox("Fill from top", st_placeFromTop);
+	UI::TextDisabled("Places Road/Platform blocks one by one into the current map (does NOT clear it; deco/snow/rally ignored), grouped by surface then category (straight → curve → slope → tilt → loop → checkpoint → special). Connect to the previous block if possible, else drop at the next grid cell (row → row → two levels " + (st_placeFromTop ? "down" : "up") + "). One start block (placed first), finish blocks last, multilap skipped. Platform = only \"...Platform...\" surfaces.");
+
+	if (UI::Button(Icons::StepForward + " Place next 10")) {
+		startnew(PlaceNext10);
+	}
+	UI::SameLine();
+	if (UI::Button(Icons::Undo + " Reset batch")) {
+		ResetPlaceBatch();
+	}
+	UI::SameLine();
+	if (g_pabQueue.Length == 0) {
+		UI::TextDisabled("Batch: not started");
+	} else {
+		UI::TextDisabled("Batch: " + tostring(g_pabIndex) + " / " + tostring(g_pabQueue.Length) + " placed");
+	}
+
+	UI::Separator();
 	UI::Markdown("**Debug: Manual Block Removal**");
 	UI::TextDisabled("Runs the same removal logic as ClearPlaced (GetBlock → direct remove → ±6 scan).");
 	UI::SetNextItemWidth(80); g_dbgRemX = UI::InputInt("X##dbgrem", g_dbgRemX);

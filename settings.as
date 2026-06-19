@@ -106,5 +106,8 @@ int testBlockPosZ = -1;
 [Setting category="General" name="Stadium Mode"]
 bool st_stadiumMode = false;
 
+[Setting category="General" name="Place-all-blocks: fill from the top down (off = from the ground up)"]
+bool st_placeFromTop = false;
+
 [Setting category="General" name="Minimum state length (blocks a Flat/Slope/Tilt run must reach before it may change)" min=1 max=8]
 int st_minStateLen = 3;
