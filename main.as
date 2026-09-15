@@ -1140,9 +1140,11 @@ int3 TryPlaceConnected(CGameEditorPluginMap@ map, int3 prevPos, const string &in
 	auto info = map.GetBlockModelFromName(name);
 	if (info is null) return int3(-1, -1, -1);
 
-	while (!map.IsEditorReadyForRequest) { yield(); }
+	uint64 _t = Time::get_Now();
+	while (!map.IsEditorReadyForRequest) { g_pabReadyYields++; yield(); }
 	map.GetConnectResults(prevBlock, info);
-	while (!map.IsEditorReadyForRequest) { yield(); }
+	while (!map.IsEditorReadyForRequest) { g_pabReadyYields++; yield(); }
+	g_pabTConnect += Time::get_Now() - _t; g_pabNConnect++;
 
 	for (uint r = 0; r < map.ConnectResults.Length; r++) {
 		auto res = map.ConnectResults[r];
@@ -1221,6 +1223,43 @@ int g_pabCol = 0, g_pabRow = 0, g_pabLevel = 0, g_pabCols = 1, g_pabRows = 1;
 bool g_pabHasLast = false;
 int3 g_pabLastPos;
 int g_pabConnected = 0, g_pabGrid = 0, g_pabSkipped = 0, g_pabPlaced = 0;
+
+// Timing diagnostics (ms). connect = our map.GetConnectResults + its editor-ready waits;
+// place/scan are read from the shared g_tPlace/g_tScan counters (PlaceBlock / FindNewlyPlacedBlock).
+// g_pabReadyYields = how many frames we spun waiting for the editor to be ready.
+uint64 g_pabTConnect = 0; int g_pabNConnect = 0;
+int g_pabReadyYields = 0;
+uint64 g_pabWall0 = 0;
+
+// Zero the timing counters and start the wall clock for a run.
+void PabResetTiming()
+{
+	g_tPlace = 0; g_nPlace = 0;          // PlaceBlock (block_placement.as)
+	g_tScan  = 0; g_nScan  = 0;          // FindNewlyPlacedBlock (main.as)
+	g_pabTConnect = 0; g_pabNConnect = 0;
+	g_pabReadyYields = 0;
+	g_pabWall0 = Time::get_Now();
+}
+
+// Print where the time went: total wall time split into connect / place / scan / other,
+// with call counts and per-block / per-call averages.
+void PabPrintTiming(int total)
+{
+	uint64 wall  = Time::get_Now() - g_pabWall0;
+	uint64 known = g_pabTConnect + g_tPlace + g_tScan;
+	uint64 other = wall > known ? wall - known : 0;
+	string perBlk = total > 0 ? tostring(wall / uint64(total)) : "0";
+	TGprint("\\$0ff\\$sTiming: total " + tostring(wall) + "ms for " + tostring(total)
+		+ " blocks (" + perBlk + "ms/block)");
+	TGprint("\\$0ff\\$s  connect " + tostring(g_pabTConnect) + "ms / " + tostring(g_pabNConnect) + "x"
+		+ (g_pabNConnect > 0 ? " (" + tostring(g_pabTConnect / uint64(g_pabNConnect)) + "ms avg)" : ""));
+	TGprint("\\$0ff\\$s  place   " + tostring(g_tPlace) + "ms / " + tostring(g_nPlace) + "x"
+		+ (g_nPlace > 0 ? " (" + tostring(g_tPlace / uint64(g_nPlace)) + "ms avg)" : ""));
+	TGprint("\\$0ff\\$s  scan    " + tostring(g_tScan) + "ms / " + tostring(g_nScan) + "x"
+		+ (g_nScan > 0 ? " (" + tostring(g_tScan / uint64(g_nScan)) + "ms avg)" : ""));
+	TGprint("\\$0ff\\$s  other (waits/UI/build) " + tostring(other) + "ms; editor-ready yields "
+		+ tostring(g_pabReadyYields));
+}
 
 // Build the ordered placement queue and reset all progress/grid state.
 //   - platformOnly: only blocks whose IdName contains "Platform".
@@ -1349,15 +1388,17 @@ void PlaceBlocksImpl(bool platformOnly)
 	LoadMapSize();
 	PabBuildQueue(map, platformOnly);
 	int total = int(g_pabQueue.Length);
+	PabResetTiming();
 
 	while (g_pabIndex < g_pabQueue.Length) {
 		PabPlaceOne(map);
-		while (!map.IsEditorReadyForRequest) { yield(); }
+		while (!map.IsEditorReadyForRequest) { g_pabReadyYields++; yield(); }
 	}
 
 	TGprint("\\$0f0\\$sPlace " + (platformOnly ? "platform" : "all") + " blocks done: placed "
 		+ tostring(g_pabPlaced) + " (connected " + tostring(g_pabConnected) + ", grid "
 		+ tostring(g_pabGrid) + "), skipped " + tostring(g_pabSkipped));
+	PabPrintTiming(total);
 	UI::ShowNotification("Placed " + tostring(g_pabPlaced) + "/" + tostring(total)
 		+ " blocks (connected " + tostring(g_pabConnected) + ", grid " + tostring(g_pabGrid) + ").");
 }
@@ -1383,10 +1424,12 @@ void PlaceNext10()
 
 	int start = int(g_pabIndex);
 	int target = Math::Min(int(g_pabQueue.Length), start + 10);
+	PabResetTiming();
 	for (int k = start; k < target; k++) {
 		PabPlaceOne(map);
-		while (!map.IsEditorReadyForRequest) { yield(); }
+		while (!map.IsEditorReadyForRequest) { g_pabReadyYields++; yield(); }
 	}
+	PabPrintTiming(target - start);
 
 	bool done = g_pabIndex >= g_pabQueue.Length;
 	UI::ShowNotification("Placed blocks " + tostring(start + 1) + "–" + tostring(g_pabIndex)
